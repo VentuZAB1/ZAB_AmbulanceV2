@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Death UI</title>
+    <link rel="stylesheet" href="death_ui.css">
+</head>
+<body>
+    <div id="death-container" class="death-container hidden">
+        <!-- Hold Progress Text (Top) -->
+        <div id="hold-progress-text" class="hold-progress-text top-text hidden">
+            <span id="hold-timer">0.0s</span> / <span id="hold-total">5.0s</span>
+        </div>
+
+        <!-- Main Layout with Timer and Side Texts -->
+        <div class="main-layout">
+            <!-- Left Side Text -->
+            <div class="left-side">
+                <div id="signal-text" class="side-text">
+                    Изпратете сигнал към EMS натиснете [G]
+                </div>
+            </div>
+
+            <!-- Central Timer -->
+            <div class="timer-container">
+                <div class="circular-progress">
+                    <svg class="progress-ring" width="120" height="120">
+                        <circle class="progress-ring__circle"
+                                stroke="#8b45c1"
+                                stroke-width="4"
+                                fill="transparent"
+                                r="56"
+                                cx="60"
+                                cy="60"/>
+                    </svg>
+                    <!-- Hold Progress Overlay -->
+                    <svg class="hold-progress-ring" width="120" height="120">
+                        <circle id="hold-progress-circle" class="hold-progress-ring__circle"
+                                stroke="#dc3545"
+                                stroke-width="6"
+                                fill="transparent"
+                                r="50"
+                                cx="60"
+                                cy="60"/>
+                    </svg>
+                    <div class="timer-text">
+                        <span id="timer-minutes">02</span>:<span id="timer-seconds">00</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Side Text -->
+            <div class="right-side">
+                <div id="respawn-text" class="side-text hidden">
+                    Задръжте [E] за да се респаунете
+                </div>
+            </div>
+        </div>
+
+        <!-- Warning Text (Bottom) -->
+        <div id="warning-text" class="warning-text bottom-text hidden">
+            (Всички айтъми ще бъдат изтрити!)
+        </div>
+
+        <!-- Respawn Progress Bar -->
+        <div id="respawn-progress" class="respawn-progress hidden">
+            <div class="respawn-bar">
+                <div id="respawn-fill" class="respawn-fill"></div>
+            </div>
+            <div class="respawn-progress-text">Респаун...</div>
+        </div>
+
+        <!-- Signal Sent Indicator -->
+        <div id="signal-sent" class="signal-indicator hidden">
+            <i class="signal-icon">📡</i>
+            <span class="signal-text">Сигнал изпратен!</span>
+        </div>
+    </div>
+
+    <script src="death_ui.js"></script>
+</body>
+</html>
