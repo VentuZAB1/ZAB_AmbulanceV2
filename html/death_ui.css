@@ -381,8 +381,10 @@ body {
 .hidden {
     opacity: 0 !important;
     visibility: hidden !important;
+    display: none !important;
     transform: translateY(20px) !important;
     transition: all 0.3s ease !important;
+    pointer-events: none !important;
 }
 
 /* Responsive adjustments */
