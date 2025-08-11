@@ -15,20 +15,68 @@ end
 
 debugPrint("Death UI script loaded successfully")
 
+-- Client-side security system
+local lastSignalTime = 0
+local lastRespawnTime = 0
+local signalCooldown = 60000 -- 60 seconds in milliseconds
+local respawnCooldown = 30000 -- 30 seconds in milliseconds
+local spamCooldown = 5000 -- 5 seconds in milliseconds
+local lastSpamNotification = 0
+
+-- Security validation functions
+local function isOnCooldown(lastTime, cooldown)
+    local currentTime = GetGameTimer()
+    return (currentTime - lastTime) < cooldown
+end
+
+local function validatePlayerState()
+    -- Check if player is actually dead
+    if not exports.qbx_medical:IsDead() then
+        debugPrint("Security: Player not dead but trying to use death UI")
+        return false
+    end
+
+    return true
+end
+
+local function validatePlayerStateForUI()
+    -- Check if player is actually dead
+    if not exports.qbx_medical:IsDead() then
+        debugPrint("Security: Player not dead but trying to use death UI")
+        return false
+    end
+
+    -- Check if death UI is visible (only for UI-specific actions)
+    if not isDeathUIVisible then
+        debugPrint("Security: Death UI not visible but trying to use death functions")
+        return false
+    end
+
+    return true
+end
+
+local function logSuspiciousActivity(action, reason)
+    debugPrint("SUSPICIOUS ACTIVITY:", action, reason)
+    -- You can add additional logging here
+end
+
 local isDeathUIVisible = false
 local deathTimer = 0
 local isRespawnPhase = false
 local isHoldingRespawn = false
 local respawnHoldTime = 0
 local signalSent = false
-local lastSignalTime = 0
-local signalCooldown = 60000 -- 60 seconds in milliseconds
-local spamCooldown = 5000 -- 5 seconds in milliseconds
-local lastSpamNotification = 0
 
 -- NUI Callbacks (sendEMSSignal handled directly in key controls now)
 
 RegisterNUICallback('startRespawnHold', function(data, cb)
+    -- Security validation
+    if not validatePlayerStateForUI() then
+        logSuspiciousActivity('startRespawnHold', 'Invalid player state')
+        cb('error')
+        return
+    end
+
     if isRespawnPhase and not isHoldingRespawn then
         isHoldingRespawn = true
         respawnHoldTime = 0
@@ -50,6 +98,13 @@ RegisterNUICallback('startRespawnHold', function(data, cb)
 end)
 
 RegisterNUICallback('stopRespawnHold', function(data, cb)
+    -- Security validation
+    if not validatePlayerStateForUI() then
+        logSuspiciousActivity('stopRespawnHold', 'Invalid player state')
+        cb('error')
+        return
+    end
+
     isHoldingRespawn = false
     respawnHoldTime = 0
 
@@ -60,7 +115,22 @@ RegisterNUICallback('stopRespawnHold', function(data, cb)
 end)
 
 RegisterNUICallback('respawnPlayer', function(data, cb)
+    -- Security validation
+    if not validatePlayerStateForUI() then
+        logSuspiciousActivity('respawnPlayer', 'Invalid player state')
+        cb('error')
+        return
+    end
+
+    -- Check respawn cooldown
+    if isOnCooldown(lastRespawnTime, respawnCooldown) then
+        logSuspiciousActivity('respawnPlayer', 'Respawn cooldown active')
+        cb('error')
+        return
+    end
+
     if isRespawnPhase and isHoldingRespawn then
+        lastRespawnTime = GetGameTimer()
         TriggerServerEvent('ambulance:server:respawnPlayer')
         hideDeathUI()
     end
@@ -68,6 +138,13 @@ RegisterNUICallback('respawnPlayer', function(data, cb)
 end)
 
 RegisterNUICallback('timerExpired', function(data, cb)
+    -- Security validation
+    if not validatePlayerStateForUI() then
+        logSuspiciousActivity('timerExpired', 'Invalid player state')
+        cb('error')
+        return
+    end
+
     isRespawnPhase = true
     debugPrint("Timer expired, respawn phase activated")
     cb('ok')
@@ -134,11 +211,11 @@ function hideDeathUI()
     })
 end
 
--- Control Disabling (runs at 60 FPS only when dead)
+-- Optimized Control Disabling (runs at 10 FPS when dead and UI visible)
 CreateThread(function()
     while true do
-        if isDeathUIVisible then
-            Wait(0) -- Need to run every frame to disable controls properly
+        if isDeathUIVisible and exports.qbx_medical:IsDead() then
+            Wait(100) -- Run at 10 FPS instead of 60 FPS for better performance
             -- Disable movement and action controls but allow camera and keyboard
             DisableControlAction(0, 30, true)  -- Move Left/Right
             DisableControlAction(0, 31, true)  -- Move Forward/Back
@@ -157,14 +234,15 @@ CreateThread(function()
             DisableControlAction(0, 263, true) -- Melee Attack 1
             DisableControlAction(0, 264, true) -- Melee Attack 2
 
-            -- Allow ESC key for pause menu/map
+            -- Allow phone and other controls but disable ESC key
             EnableControlAction(0, 27, true)   -- Phone
-            EnableControlAction(0, 200, true)  -- Pause Menu (ESC key)
-            EnableControlAction(0, 199, true)  -- Pause Menu Alternate
+            DisableControlAction(0, 200, true) -- Pause Menu (ESC key) - DISABLED
+            DisableControlAction(0, 199, true) -- Pause Menu Alternate - DISABLED
             EnableControlAction(0, 167, true)  -- Phone menu
             EnableControlAction(0, 177, true)  -- Cancel
+
         else
-            Wait(1000) -- When not dead, check less frequently
+            Wait(2000) -- When not dead or UI hidden, check even less frequently
         end
     end
 end)
@@ -172,10 +250,11 @@ end)
 -- Key Input Handling (smart polling for G key with cooldown optimization)
 CreateThread(function()
     while true do
-        if isDeathUIVisible then
-            local currentTime = GetGameTimer()
-            local timeSinceLastSignal = currentTime - lastSignalTime
+        local currentTime = GetGameTimer()
+        local timeSinceLastSignal = currentTime - lastSignalTime
 
+        -- Check if player is dead (regardless of UI visibility)
+        if exports.qbx_medical:IsDead() then
             -- If we're in cooldown period, check less frequently to save performance
             if timeSinceLastSignal < signalCooldown then
                 Wait(1000) -- Check every second during cooldown
@@ -186,6 +265,12 @@ CreateThread(function()
             -- Check for signal key (G) - works during any phase
             if IsControlJustPressed(0, 47) then -- G key
                 currentTime = GetGameTimer()
+
+                -- Security validation
+                if not validatePlayerState() then
+                    logSuspiciousActivity('G key signal', 'Invalid player state')
+                    goto continue
+                end
 
                 -- Check if player is spamming (prevent spam notifications)
                 if currentTime - lastSpamNotification < spamCooldown then
@@ -201,7 +286,7 @@ CreateThread(function()
                 end
 
                 -- Send signal
-                                        debugPrint("G key pressed, sending EMS signal")
+                debugPrint("G key pressed, sending EMS signal")
                 lastSignalTime = currentTime
                 lastSpamNotification = currentTime
                 TriggerServerEvent('ambulance:server:sendEMSSignal')
@@ -217,7 +302,7 @@ CreateThread(function()
 
             ::continue::
         else
-            Wait(1000) -- Check less frequently when death UI is not visible
+            Wait(1000) -- Check less frequently when not dead
         end
     end
 end)
@@ -228,17 +313,22 @@ CreateThread(function()
         if isDeathUIVisible then
             Wait(50) -- Check every 50ms for ESC and respawn keys
 
-            -- Check for ESC key to hide/show UI
+                        -- Simple ESC key handling - hide UI when pressed, show when released
             if IsControlJustPressed(0, 200) then -- ESC key
                 SendNUIMessage({
-                    action = 'toggleUIVisibility',
-                    visible = false
+                    action = 'hideDeathUI'
                 })
+                isDeathUIVisible = false
+                debugPrint("ESC pressed - hiding death UI")
             elseif IsControlJustReleased(0, 200) then -- ESC key released
-                SendNUIMessage({
-                    action = 'toggleUIVisibility',
-                    visible = true
-                })
+                if exports.qbx_medical:IsDead() then
+                    isDeathUIVisible = true
+                    SendNUIMessage({
+                        action = 'showDeathUI',
+                        config = deathUIConfig
+                    })
+                    debugPrint("ESC released - showing death UI")
+                end
             end
 
             -- Check for respawn key (E) during respawn phase
@@ -247,8 +337,20 @@ CreateThread(function()
                 debugPrint("E pressed - isRespawnPhase:", isRespawnPhase, "isDeathUIVisible:", isDeathUIVisible)
             end
 
-            if isRespawnPhase then
+                        if isRespawnPhase and isDeathUIVisible then
                 if IsControlPressed(0, 38) then -- E key
+                    -- Security validation
+                    if not validatePlayerState() then
+                        logSuspiciousActivity('E key respawn', 'Invalid player state')
+                        goto continue
+                    end
+
+                    -- Check respawn cooldown
+                    if isOnCooldown(lastRespawnTime, respawnCooldown) then
+                        logSuspiciousActivity('E key respawn', 'Respawn cooldown active')
+                        goto continue
+                    end
+
                     debugPrint("E key pressed, isRespawnPhase:", isRespawnPhase, "timer expired:", true)
                     if not isHoldingRespawn then
                         debugPrint("Starting hold progress")
@@ -274,6 +376,7 @@ CreateThread(function()
 
                     -- Check if held long enough
                     if holdDuration >= (deathUIConfig.respawnHoldTime * 1000) then
+                        lastRespawnTime = GetGameTimer()
                         TriggerServerEvent('ambulance:server:respawnPlayer')
                         hideDeathUI()
                     end
@@ -285,6 +388,8 @@ CreateThread(function()
                     })
                 end
             end
+
+            ::continue::
         else
             Wait(2000) -- Check every 2 seconds when death UI is not visible
         end
@@ -388,6 +493,8 @@ CreateThread(function()
         wasDead = isDead
     end
 end)
+
+-- Simple and clean ESC handling - no complex threads
 
 -- Debug command to manually activate respawn phase (only works if debug is enabled)
 RegisterCommand('forcerespawn', function()
