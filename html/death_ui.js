@@ -101,9 +101,13 @@ class DeathUI {
         this.warningText.classList.add('hidden');
         this.respawnProgress.classList.add('hidden');
         this.signalSent.classList.add('hidden');
+        this.hideHoldProgress(); // Ensure hold progress is hidden when showing UI
 
         // Show container with whoosh animation
         this.container.classList.remove('hidden');
+        this.container.style.display = 'flex';
+        this.container.style.visibility = 'visible';
+        this.container.style.pointerEvents = 'auto';
         this.container.style.transform = 'translateX(-50%) scale(0.5) translateY(100px)';
         this.container.style.opacity = '0';
 
@@ -118,10 +122,23 @@ class DeathUI {
         this.startTimer();
     }
 
-    hideUI() {
+        hideUI() {
         this.container.classList.add('hidden');
+        this.container.style.display = 'none';
+        this.container.style.visibility = 'hidden';
+        this.container.style.opacity = '0';
+        this.container.style.pointerEvents = 'none';
         this.stopTimer();
         this.stopRespawnProgress();
+        this.hideHoldProgress();
+
+        // Reset all UI states
+        this.isRespawnPhase = false;
+        this.isSignalSent = false;
+        this.signalText.classList.remove('hidden');
+        this.respawnText.classList.add('hidden');
+        this.warningText.classList.add('hidden');
+        this.signalSent.classList.add('hidden');
     }
 
     toggleVisibility(visible) {
@@ -303,11 +320,16 @@ class DeathUI {
 
     showHoldProgress() {
         this.holdProgressText.classList.remove('hidden');
+        this.holdProgressRing.classList.add('visible');
         this.holdTimer.textContent = '0.0s';
     }
 
     hideHoldProgress() {
         this.holdProgressText.classList.add('hidden');
+        this.holdProgressRing.classList.remove('visible');
+        this.holdProgressCircle.style.strokeDashoffset = this.holdCircumference;
+        this.holdTimer.textContent = '0.0s';
+        this.holdTotal.textContent = '5.0s';
     }
 
             updateHoldProgress(data) {
@@ -328,6 +350,11 @@ class DeathUI {
 
         this.holdTimer.textContent = currentTime + 's';
         this.holdTotal.textContent = totalTime + 's';
+
+        // Update the visual progress of the hold progress ring
+        const progress = data.progress;
+        const offset = this.holdCircumference - (progress * this.holdCircumference);
+        this.holdProgressCircle.style.strokeDashoffset = offset;
 
         this.debugPrint("Hold progress updated - progress:", data.progress, "current:", currentTime, "total:", totalTime);
     }
