@@ -164,13 +164,48 @@ lib.callback.register('qbx_ambulancejob:server:getPlayerStatus', function(_, tar
 	return enhancedStatus
 end)
 
-local function alertAmbulance(src, text)
+-- Helper function to send ox_lib notifications with configurable settings
+local function sendConfigurableNotification(playerId, notificationKey, ...)
+	local config = sharedConfig.deathUI.oxNotifications[notificationKey]
+	if not config then
+		debugPrint("Warning: No notification config found for key:", notificationKey)
+		return
+	end
+
+	local notification = {
+		title = config.title,
+		description = config.description,
+		type = config.type,
+		position = config.position or "bottom-right",
+		duration = config.duration or 5000
+	}
+
+	-- Format description if arguments provided
+	if ... then
+		notification.description = notification.description:format(...)
+	end
+
+	-- Add style if configured
+	if config.style then
+		notification.style = config.style
+	end
+
+	TriggerClientEvent('ox_lib:notify', playerId, notification)
+end
+
+local function alertAmbulance(src, text, useOxLib)
 	local ped = GetPlayerPed(src)
 	local coords = GetEntityCoords(ped)
 	local players = exports.qbx_core:GetQBPlayers()
 	for _, v in pairs(players) do
 		if v.PlayerData.job.type == 'ems' and v.PlayerData.job.onduty then
-			TriggerClientEvent('hospital:client:ambulanceAlert', v.PlayerData.source, coords, text)
+			if useOxLib then
+				-- Send ox_lib notification for EMS down alerts
+				sendConfigurableNotification(v.PlayerData.source, 'emsDown', text)
+			else
+				-- Use the existing ambulance alert system
+				TriggerClientEvent('hospital:client:ambulanceAlert', v.PlayerData.source, coords, text)
+			end
 		end
 	end
 end
@@ -222,7 +257,8 @@ RegisterNetEvent('hospital:server:emergencyAlert', function()
 		return
 	end
 
-	alertAmbulance(src, locale('info.ems_down', player.PlayerData.charinfo.lastname))
+	-- Use configurable EMS down notification with ox_lib
+	alertAmbulance(src, player.PlayerData.charinfo.lastname, true)
 end)
 
 RegisterNetEvent('qbx_medical:server:onPlayerLaststand', function()
@@ -393,7 +429,8 @@ lib.addCommand('911e', {
 }, function(source, args)
 	-- Security validation
 	if isRateLimited(source, 'emsSignal') then
-		exports.qbx_core:Notify(source, 'You are sending too many signals. Please wait.', 'error')
+		local rateLimitConfig = sharedConfig.deathUI.oxNotifications.rateLimited
+		exports.qbx_core:Notify(source, rateLimitConfig.description, rateLimitConfig.type)
 		return
 	end
 
@@ -617,9 +654,13 @@ RegisterNetEvent('hospital:server:EmsRevivePatient', function(patientId)
 	-- Pay the EMS worker
 	emsPlayer.Functions.AddMoney('cash', sharedConfig.firstaidPayment, 'ems-patient-revival')
 
-	-- Notify both players
-	exports.qbx_core:Notify(src, ('Patient revived successfully! You earned $%d'):format(sharedConfig.firstaidPayment), 'success')
-	exports.qbx_core:Notify(patientId, 'You have been revived by a paramedic', 'success')
+	-- Notify both players using configurable texts
+	local patientRevivedConfig = sharedConfig.deathUI.oxNotifications.patientRevived
+	local revivedText = patientRevivedConfig.description:format(sharedConfig.firstaidPayment)
+	exports.qbx_core:Notify(src, revivedText, patientRevivedConfig.type)
+
+	local youWereRevivedConfig = sharedConfig.deathUI.oxNotifications.youWereRevived
+	exports.qbx_core:Notify(patientId, youWereRevivedConfig.description, youWereRevivedConfig.type)
 end)
 
 -- Death UI and EMS Signal System
@@ -633,7 +674,8 @@ RegisterNetEvent('ambulance:server:sendEMSSignal', function()
 	-- Security validation
 	if isRateLimited(src, 'emsSignal') then
 		logSuspiciousActivity(src, 'ambulance:server:sendEMSSignal', 'Rate limited')
-		exports.qbx_core:Notify(src, 'You are sending too many signals. Please wait.', 'error')
+		local rateLimitConfig = sharedConfig.deathUI.oxNotifications.rateLimited
+		exports.qbx_core:Notify(src, rateLimitConfig.description, rateLimitConfig.type)
 		return
 	end
 
@@ -676,37 +718,41 @@ RegisterNetEvent('ambulance:server:sendEMSSignal', function()
 	-- Send notification and blip to all EMS workers
 	debugPrint("Found", #emsPlayers, "EMS workers online")
 	if #emsPlayers > 0 then
-		local notificationText = sharedConfig.deathUI.texts.emsNotification:format(playerName)
+		local notificationConfig = sharedConfig.deathUI.oxNotifications.emsAlert
+		local notificationText = notificationConfig.description:format(playerName)
 		debugPrint("Sending notification:", notificationText)
 
 		for i = 1, #emsPlayers do
 			local emsId = emsPlayers[i]
 			debugPrint("Sending alert to EMS", emsId)
 
-			-- Send ox_lib notification
-			TriggerClientEvent('ox_lib:notify', emsId, {
-				title = 'EMS ALERT',
+			-- Send ox_lib notification using configurable settings
+			local notification = {
+				title = notificationConfig.title,
 				description = notificationText,
-				type = 'inform',
-				position = 'bottom-right',
-				duration = 8000,
-				style = {
-					backgroundColor = '#8b45c1',
-					color = '#ffffff',
-					['.description'] = {
-						color = '#ffffff'
-					}
-				}
-			})
+				type = notificationConfig.type,
+				position = notificationConfig.position,
+				duration = notificationConfig.duration
+			}
+
+			-- Add style if configured
+			if notificationConfig.style then
+				notification.style = notificationConfig.style
+			end
+
+			TriggerClientEvent('ox_lib:notify', emsId, notification)
 			TriggerClientEvent('ambulance:client:playEMSAlert', emsId)
 
 			-- Create flickering blip on map
 			TriggerClientEvent('ambulance:client:createPatientBlip', emsId, src, playerName, coords)
 		end
-		exports.qbx_core:Notify(src, 'Сигнал изпратен към EMS служителите', 'success')
+
+		local signalSentConfig = sharedConfig.deathUI.oxNotifications.signalSent
+		exports.qbx_core:Notify(src, signalSentConfig.description, signalSentConfig.type)
 	else
 		debugPrint("No EMS workers online")
-		exports.qbx_core:Notify(src, 'Няма налични EMS служители', 'error')
+		local noEmsConfig = sharedConfig.deathUI.oxNotifications.noEmsOnline
+		exports.qbx_core:Notify(src, noEmsConfig.description, noEmsConfig.type)
 	end
 end)
 

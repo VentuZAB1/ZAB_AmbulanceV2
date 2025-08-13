@@ -30,6 +30,63 @@ return {
             respawnText = "Задръжте [E] за да се респаунете",
             itemWarning = "(Всички айтъми ще бъдат изтрити!)",
             emsNotification = "Пострадал пациент: %s", -- %s will be replaced with RP name
+        },
+
+        -- ox_lib Notification Configuration
+        oxNotifications = {
+            emsAlert = {
+                title = "EMS ALERT",
+                description = "Пострадал пациент: %s", -- %s will be replaced with RP name
+                type = "inform",
+                position = "bottom-right",
+                duration = 8000,
+                style = {
+                    backgroundColor = "#8b45c1",
+                    color = "#ffffff",
+                    [".description"] = {
+                        color = "#ffffff"
+                    }
+                }
+            },
+            signalSent = {
+                description = "Сигнал изпратен към EMS служителите",
+                type = "success"
+            },
+            noEmsOnline = {
+                description = "Няма налични EMS служители",
+                type = "error"
+            },
+            rateLimited = {
+                description = "You are sending too many signals. Please wait.",
+                type = "error"
+            },
+            cooldownRemaining = {
+                description = "COOLDOWN - %d seconds left till you can request help again...",
+                type = "error"
+            },
+            -- Additional EMS notifications
+            patientRevived = {
+                description = "Patient revived successfully! You earned $%d",
+                type = "success"
+            },
+            youWereRevived = {
+                description = "You have been revived by a paramedic",
+                type = "success"
+            },
+            emsDown = {
+                title = "EMS DOWN",
+                description = "Doctor %s Down", -- %s will be replaced with lastname
+                type = "error",
+                position = "bottom-right",
+                duration = 5000,
+                style = {
+                    backgroundColor = "#dc2626",
+                    color = "#ffffff",
+                    [".description"] = {
+                        color = "#ffffff"
+                    }
+                }
+            }
         }
     },
 

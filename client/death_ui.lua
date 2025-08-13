@@ -150,6 +150,45 @@ RegisterNUICallback('timerExpired', function(data, cb)
     cb('ok')
 end)
 
+-- Control disabling - only run when death UI is visible
+local isControlsDisabled = false
+
+local function enableDeathControls()
+    if isControlsDisabled then return end
+    isControlsDisabled = true
+
+    CreateThread(function()
+        while isDeathUIVisible and exports.qbx_medical:IsDead() do
+            Wait(100) -- Run at 10 FPS for better performance
+            -- Disable movement and action controls but allow camera and keyboard
+            DisableControlAction(0, 30, true)  -- Move Left/Right
+            DisableControlAction(0, 31, true)  -- Move Forward/Back
+            DisableControlAction(0, 21, true)  -- Sprint
+            DisableControlAction(0, 22, true)  -- Jump
+            DisableControlAction(0, 23, true)  -- Enter Vehicle
+            DisableControlAction(0, 75, true)  -- Exit Vehicle
+            DisableControlAction(0, 24, true)  -- Attack
+            DisableControlAction(0, 25, true)  -- Aim
+            DisableControlAction(0, 44, true)  -- Cover
+            DisableControlAction(0, 37, true)  -- Select Weapon
+            DisableControlAction(0, 140, true) -- Melee Attack Light
+            DisableControlAction(0, 141, true) -- Melee Attack Heavy
+            DisableControlAction(0, 142, true) -- Melee Attack Alternate
+            DisableControlAction(0, 143, true) -- Melee Block
+            DisableControlAction(0, 263, true) -- Melee Attack 1
+            DisableControlAction(0, 264, true) -- Melee Attack 2
+
+            -- Allow phone and other controls but disable ESC key
+            EnableControlAction(0, 27, true)   -- Phone
+            DisableControlAction(0, 200, true) -- Pause Menu (ESC key) - DISABLED
+            DisableControlAction(0, 199, true) -- Pause Menu Alternate - DISABLED
+            EnableControlAction(0, 167, true)  -- Phone menu
+            EnableControlAction(0, 177, true)  -- Cancel
+        end
+        isControlsDisabled = false
+    end)
+end
+
 -- Death UI Functions
 local function showDeathUI()
     if not deathUIConfig.enabled then return end
@@ -164,6 +203,9 @@ local function showDeathUI()
     -- Reset signal cooldown on new death
     lastSignalTime = 0
     lastSpamNotification = 0
+
+    -- Enable control disabling for this death session
+    enableDeathControls()
 
     -- Force death animation with persistent flags (never ends until manually stopped)
     local ped = PlayerPedId()
@@ -199,6 +241,11 @@ function hideDeathUI()
     isHoldingRespawn = false
     signalSent = false
 
+    -- CRITICAL: Reset respawn hold time to prevent state bugs
+    respawnHoldTime = 0
+
+    debugPrint("Death UI hidden - all states reset")
+
     -- Stop the persistent death animation when revived
     local ped = PlayerPedId()
     ClearPedTasks(ped)
@@ -211,56 +258,17 @@ function hideDeathUI()
     })
 end
 
--- Optimized Control Disabling (runs at 10 FPS when dead and UI visible)
+-- Key Input Handling - optimized with reduced polling frequency
 CreateThread(function()
     while true do
-        if isDeathUIVisible and exports.qbx_medical:IsDead() then
-            Wait(100) -- Run at 10 FPS instead of 60 FPS for better performance
-            -- Disable movement and action controls but allow camera and keyboard
-            DisableControlAction(0, 30, true)  -- Move Left/Right
-            DisableControlAction(0, 31, true)  -- Move Forward/Back
-            DisableControlAction(0, 21, true)  -- Sprint
-            DisableControlAction(0, 22, true)  -- Jump
-            DisableControlAction(0, 23, true)  -- Enter Vehicle
-            DisableControlAction(0, 75, true)  -- Exit Vehicle
-            DisableControlAction(0, 24, true)  -- Attack
-            DisableControlAction(0, 25, true)  -- Aim
-            DisableControlAction(0, 44, true)  -- Cover
-            DisableControlAction(0, 37, true)  -- Select Weapon
-            DisableControlAction(0, 140, true) -- Melee Attack Light
-            DisableControlAction(0, 141, true) -- Melee Attack Heavy
-            DisableControlAction(0, 142, true) -- Melee Attack Alternate
-            DisableControlAction(0, 143, true) -- Melee Block
-            DisableControlAction(0, 263, true) -- Melee Attack 1
-            DisableControlAction(0, 264, true) -- Melee Attack 2
-
-            -- Allow phone and other controls but disable ESC key
-            EnableControlAction(0, 27, true)   -- Phone
-            DisableControlAction(0, 200, true) -- Pause Menu (ESC key) - DISABLED
-            DisableControlAction(0, 199, true) -- Pause Menu Alternate - DISABLED
-            EnableControlAction(0, 167, true)  -- Phone menu
-            EnableControlAction(0, 177, true)  -- Cancel
-
-        else
-            Wait(2000) -- When not dead or UI hidden, check even less frequently
-        end
-    end
-end)
-
--- Key Input Handling (smart polling for G key with cooldown optimization)
-CreateThread(function()
-    while true do
-        local currentTime = GetGameTimer()
-        local timeSinceLastSignal = currentTime - lastSignalTime
-
-        -- Check if player is dead (regardless of UI visibility)
+        -- Only poll for keys when dead, with smart frequency adjustment
         if exports.qbx_medical:IsDead() then
-            -- If we're in cooldown period, check less frequently to save performance
-            if timeSinceLastSignal < signalCooldown then
-                Wait(1000) -- Check every second during cooldown
-            else
-                Wait(0) -- Check every frame when signal is available
-            end
+            local currentTime = GetGameTimer()
+            local timeSinceLastSignal = currentTime - lastSignalTime
+
+            -- Smart wait timing - check every frame only when signal is available and ready
+            local waitTime = (timeSinceLastSignal < signalCooldown) and 500 or 50
+            Wait(waitTime)
 
             -- Check for signal key (G) - works during any phase
             if IsControlJustPressed(0, 47) then -- G key
@@ -280,7 +288,9 @@ CreateThread(function()
                 -- Check if still on cooldown
                 if currentTime - lastSignalTime < signalCooldown then
                     local remainingTime = math.ceil((signalCooldown - (currentTime - lastSignalTime)) / 1000)
-                    exports.qbx_core:Notify('COOLDOWN - ' .. remainingTime .. ' seconds left till you can request help again...', 'error')
+                    local cooldownConfig = sharedConfig.deathUI.oxNotifications.cooldownRemaining
+                    local cooldownText = cooldownConfig.description:format(remainingTime)
+                    exports.qbx_core:Notify(cooldownText, cooldownConfig.type)
                     lastSpamNotification = currentTime
                     goto continue
                 end
@@ -295,14 +305,11 @@ CreateThread(function()
                     action = 'signalSent'
                 })
                 debugPrint("Signal sent to server and NUI")
-
-                -- After sending signal, we can wait longer since cooldown is active
-                Wait(1000) -- Wait 1 second after sending signal before checking again
             end
 
             ::continue::
         else
-            Wait(1000) -- Check less frequently when not dead
+            Wait(2000) -- Check less frequently when not dead
         end
     end
 end)
@@ -359,6 +366,17 @@ CreateThread(function()
                         })
                         isHoldingRespawn = true
                         respawnHoldTime = GetGameTimer()
+
+                        -- SECURITY: Double-check cooldown at start of hold
+                        local currentTime = GetGameTimer()
+                        if isOnCooldown(lastRespawnTime, respawnCooldown) then
+                            debugPrint("Respawn hold blocked - still on cooldown")
+                            isHoldingRespawn = false
+                            SendNUIMessage({
+                                action = 'stopHoldProgress'
+                            })
+                            goto continue
+                        end
                     end
 
                     -- Update hold progress
@@ -377,15 +395,28 @@ CreateThread(function()
                     -- Check if held long enough
                     if holdDuration >= (deathUIConfig.respawnHoldTime * 1000) then
                         lastRespawnTime = GetGameTimer()
+                        isHoldingRespawn = false -- CRITICAL: Reset state before respawning
+
+                        -- SECURITY: Final validation before respawn
+                        if not isRespawnPhase or not isDeathUIVisible then
+                            debugPrint("Respawn blocked - invalid UI state")
+                            SendNUIMessage({
+                                action = 'stopHoldProgress'
+                            })
+                            goto continue
+                        end
+
+                        debugPrint("Respawn completed successfully")
                         TriggerServerEvent('ambulance:server:respawnPlayer')
                         hideDeathUI()
                     end
                 elseif isHoldingRespawn then
-                    -- Key released, stop respawn
+                    -- Key released, stop respawn and reset state properly
                     isHoldingRespawn = false
                     SendNUIMessage({
                         action = 'stopHoldProgress'
                     })
+                    debugPrint("Respawn hold cancelled - state reset")
                 end
             end
 
@@ -456,41 +487,30 @@ RegisterNetEvent('qbx_medical:client:playerRevived', function()
     end
 end)
 
--- Check for death state changes and maintain death animation
-CreateThread(function()
-    local wasDead = false
+-- Use statebag change handler instead of continuous polling for death state
+AddStateBagChangeHandler('isDead', ('player:%s'):format(cache.serverId), function(bagName, key, value, reserved, replicated)
+    debugPrint("Death state changed via statebag - isDead:", value)
 
-    while true do
-        local checkInterval = isDeathUIVisible and 500 or 2000 -- Check more frequently when dead
-        Wait(checkInterval)
-
-        local isDead = exports.qbx_medical:IsDead()
-
-        if isDead and not wasDead then
-            -- Player just died (only if not already showing death UI)
-            if not isDeathUIVisible then
-                debugPrint("Death state change detected - starting death UI")
-                CreateThread(function()
-                    Wait(2000) -- Wait for death animation
-                    if exports.qbx_medical:IsDead() and deathUIConfig.enabled and not isDeathUIVisible then
-                        showDeathUI()
-                    end
-                end)
-            else
-                debugPrint("Player died again but UI already showing")
-            end
-        elseif not isDead and wasDead then
-            -- Player just revived
-            debugPrint("Revival state change detected")
-            if isDeathUIVisible then
-                hideDeathUI()
-                TriggerServerEvent('ambulance:server:patientRevived', GetPlayerServerId(PlayerId()))
-            end
+    if value then
+        -- Player just died
+        if not isDeathUIVisible then
+            debugPrint("Death state change detected - starting death UI")
+            CreateThread(function()
+                Wait(2000) -- Wait for death animation
+                if exports.qbx_medical:IsDead() and deathUIConfig.enabled and not isDeathUIVisible then
+                    showDeathUI()
+                end
+            end)
+        else
+            debugPrint("Player died again but UI already showing")
         end
-
-        -- Death animation is now persistent with proper flags - no monitoring needed
-
-        wasDead = isDead
+    else
+        -- Player just revived
+        debugPrint("Revival state change detected")
+        if isDeathUIVisible then
+            hideDeathUI()
+            TriggerServerEvent('ambulance:server:patientRevived', GetPlayerServerId(PlayerId()))
+        end
     end
 end)
 

@@ -284,7 +284,7 @@ CreateThread(function()
                     lib.playAnim(cache.ped, InBedDict, InBedAnim, 8.0, 1.0, -1, 1, 0, false, 0, false)
                 end
                 OnKeyPress(leaveBed)
-                Wait(0)
+                Wait(50) -- Reduced from Wait(0) to 50ms for better performance
             end
             lib.hideTextUI()
         else

@@ -77,28 +77,44 @@ local function handleLastStand()
     end
 end
 
----Set dead and last stand states.
-CreateThread(function()
-    local lastUpdate = GetGameTimer()
-    while true do
-        local isDead = exports.qbx_medical:IsDead()
-        local inLaststand = exports.qbx_medical:IsLaststand()
-        if isDead or inLaststand then
-            if isDead then
-                handleDead(cache.ped)
-            elseif inLaststand then
-                handleLastStand()
-            end
+-- Use statebag change handlers instead of continuous polling
+local isDeadStateActive = false
+local lastDoctorUpdate = GetGameTimer()
 
-            local currentTime = GetGameTimer()
-            if (currentTime - lastUpdate) > 60000 then
-                doctorCount = getDoctorCount()
-                lastUpdate = currentTime
-            end
+-- Handler for death state changes
+AddStateBagChangeHandler('qbx_medical:deathState', ('player:%s'):format(cache.serverId), function(bagName, key, value, reserved, replicated)
+    local medicalConfig = require '@qbx_medical/config/shared'
+    local isDead = (value == medicalConfig.deathState.DEAD)
+    local inLaststand = (value == medicalConfig.deathState.LAST_STAND)
 
-            Wait(0)
-        else
-            Wait(1000)
+    if isDead or inLaststand then
+        if not isDeadStateActive then
+            isDeadStateActive = true
+            -- Start the handler thread only when needed
+            CreateThread(function()
+                while isDeadStateActive and (exports.qbx_medical:IsDead() or exports.qbx_medical:IsLaststand()) do
+                    local currentIsDead = exports.qbx_medical:IsDead()
+                    local currentInLaststand = exports.qbx_medical:IsLaststand()
+
+                    if currentIsDead then
+                        handleDead(cache.ped)
+                    elseif currentInLaststand then
+                        handleLastStand()
+                    end
+
+                    -- Update doctor count every 60 seconds
+                    local currentTime = GetGameTimer()
+                    if (currentTime - lastDoctorUpdate) > 60000 then
+                        doctorCount = getDoctorCount()
+                        lastDoctorUpdate = currentTime
+                    end
+
+                    Wait(500) -- Much less frequent than Wait(0)
+                end
+                isDeadStateActive = false
+            end)
         end
+    else
+        isDeadStateActive = false
     end
 end)
