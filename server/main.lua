@@ -577,29 +577,18 @@ RegisterNetEvent('hospital:server:EmsHealPatient', function(patientId)
 	-- Remove bandage from EMS worker
 	exports.ox_inventory:RemoveItem(src, 'bandage', 1)
 
-	-- Get patient ped
-	local patientPed = GetPlayerPed(patientId)
-	local currentHealth = GetEntityHealth(patientPed)
-	local maxHealth = GetEntityMaxHealth(patientPed)
-	
-	-- Calculate healing amount (configurable percentage of max health)
-	local healAmount = math.floor(maxHealth * (sharedConfig.bandageHealAmount / 100))
-	local newHealth = math.min(currentHealth + healAmount, maxHealth)
+	-- Trigger client event to heal the patient (SetEntityHealth is client-side only!)
+	local healAmount = sharedConfig.bandageHealAmount or 25 -- Default 25% if not configured
+	TriggerClientEvent('hospital:client:HealPlayer', patientId, healAmount)
 
-	-- Apply healing to patient
-	SetEntityHealth(patientPed, newHealth)
-	
-	-- Trigger client event to update medical status
-	TriggerClientEvent('qbx_medical:client:onPlayerHeal', patientId, healAmount)
-
-	-- Pay the EMS worker
-	emsPlayer.Functions.AddMoney('cash', sharedConfig.bandagePayment, 'ems-patient-heal')
+	-- Pay the EMS worker (KEEPING YOUR ORIGINAL EXPORT)
+	exports.qbx_core:AddMoney(src, 'cash', sharedConfig.bandagePayment, 'EMS healing payment')
 
 	-- Notify both players
 	exports.qbx_core:Notify(src, ('Patient healed successfully! You earned $%d'):format(sharedConfig.bandagePayment), 'success')
 	exports.qbx_core:Notify(patientId, 'You have been treated by a paramedic', 'success')
 	
-	debugPrint("EMS", src, "healed patient", patientId, "- Health:", currentHealth, "->", newHealth)
+	debugPrint("EMS", src, "healed patient", patientId, "for", healAmount, "% health")
 end)
 
 ---EMS worker revives patient with firstaid and gets paid
@@ -658,7 +647,7 @@ RegisterNetEvent('hospital:server:EmsRevivePatient', function(patientId)
 	-- Revive the patient using the proper medical system event
 	TriggerClientEvent('qbx_medical:client:revive', patientId)
 	
-	-- Clear death metadata
+	-- Clear death metadata (KEEPING YOUR ORIGINAL CODE)
 	patientPlayer.Functions.SetMetaData('isdead', false)
 	patientPlayer.Functions.SetMetaData('inlaststand', false)
 
@@ -674,12 +663,12 @@ RegisterNetEvent('hospital:server:EmsRevivePatient', function(patientId)
 		activeSignals[patientId] = nil
 	end
 
-	-- Pay the EMS worker
-	emsPlayer.Functions.AddMoney('cash', sharedConfig.firstaidPayment, 'ems-patient-revival')
+	-- Pay the EMS worker (KEEPING YOUR ORIGINAL EXPORT)
+	exports.qbx_core:AddMoney(src, 'cash', sharedConfig.firstaidPayment, 'EMS revival payment')
 
-	-- Notify both players using configurable texts
-	exports.qbx_core:Notify(src, ('Patient revived successfully! You earned $%d'):format(sharedConfig.firstaidPayment), 'success')
-	exports.qbx_core:Notify(patientId, 'You have been revived by a paramedic', 'success')
+	-- Notify both players (KEEPING YOUR ORIGINAL NOTIFICATIONS)
+	exports.qbx_core:Notify(src, 'Patient revived successfully. Payment: $' .. sharedConfig.firstaidPayment, 'success')
+	exports.qbx_core:Notify(patientId, 'You have been revived by EMS', 'success')
 	
 	debugPrint("EMS", src, "revived patient", patientId)
 end)
