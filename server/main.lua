@@ -570,22 +570,27 @@ RegisterNetEvent('hospital:server:EmsHealPatient', function(patientId)
 
 	-- Check if EMS has bandages
 	if exports.ox_inventory:Search(src, 'count', 'bandage') == 0 then
-		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'No bandage in inventory')
+		exports.qbx_core:Notify(src, 'You need bandages to heal the patient', 'error')
 		return
 	end
 
 	-- Remove bandage from EMS worker
 	exports.ox_inventory:RemoveItem(src, 'bandage', 1)
 
-	-- Calculate healing amount (25% of max health)
-	local currentHealth = GetEntityHealth(GetPlayerPed(patientId))
-	local maxHealth = 200 -- Standard max health
+	-- Get patient ped
+	local patientPed = GetPlayerPed(patientId)
+	local currentHealth = GetEntityHealth(patientPed)
+	local maxHealth = GetEntityMaxHealth(patientPed)
+	
+	-- Calculate healing amount (configurable percentage of max health)
 	local healAmount = math.floor(maxHealth * (sharedConfig.bandageHealAmount / 100))
 	local newHealth = math.min(currentHealth + healAmount, maxHealth)
 
-	-- Heal the patient
-	SetEntityHealth(GetPlayerPed(patientId), newHealth)
-	TriggerClientEvent('qbx_medical:client:heal', patientId, 'partial')
+	-- Apply healing to patient
+	SetEntityHealth(patientPed, newHealth)
+	
+	-- Trigger client event to update medical status
+	TriggerClientEvent('qbx_medical:client:onPlayerHeal', patientId, healAmount)
 
 	-- Pay the EMS worker
 	emsPlayer.Functions.AddMoney('cash', sharedConfig.bandagePayment, 'ems-patient-heal')
@@ -593,6 +598,8 @@ RegisterNetEvent('hospital:server:EmsHealPatient', function(patientId)
 	-- Notify both players
 	exports.qbx_core:Notify(src, ('Patient healed successfully! You earned $%d'):format(sharedConfig.bandagePayment), 'success')
 	exports.qbx_core:Notify(patientId, 'You have been treated by a paramedic', 'success')
+	
+	debugPrint("EMS", src, "healed patient", patientId, "- Health:", currentHealth, "->", newHealth)
 end)
 
 ---EMS worker revives patient with firstaid and gets paid
@@ -632,35 +639,49 @@ RegisterNetEvent('hospital:server:EmsRevivePatient', function(patientId)
 		return
 	end
 
-	-- Check if patient is actually dead
+	-- Check if patient is actually dead or in laststand
 	local patientPlayer = exports.qbx_core:GetPlayer(patientId)
-	if not patientPlayer.PlayerData.metadata.isdead then
-		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Patient not dead')
+	if not patientPlayer.PlayerData.metadata.isdead and not patientPlayer.PlayerData.metadata.inlaststand then
+		exports.qbx_core:Notify(src, 'Patient is not unconscious', 'error')
 		return
 	end
 
 	-- Check if EMS has firstaid
 	if exports.ox_inventory:Search(src, 'count', 'firstaid') == 0 then
-		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'No firstaid in inventory')
+		exports.qbx_core:Notify(src, 'You need firstaid to revive the patient', 'error')
 		return
 	end
 
 	-- Remove firstaid from EMS worker
 	exports.ox_inventory:RemoveItem(src, 'firstaid', 1)
 
-	-- Revive the patient
-	TriggerClientEvent('qbx_medical:client:playerRevived', patientId)
+	-- Revive the patient using the proper medical system event
+	TriggerClientEvent('qbx_medical:client:revive', patientId)
+	
+	-- Clear death metadata
+	patientPlayer.Functions.SetMetaData('isdead', false)
+	patientPlayer.Functions.SetMetaData('inlaststand', false)
+
+	-- Clear patient's signal if they have one
+	if activeSignals and activeSignals[patientId] then
+		-- Notify all EMS to remove blip
+		for _, playerId in pairs(GetPlayers()) do
+			local emsPlayerLoop = exports.qbx_core:GetPlayer(tonumber(playerId))
+			if emsPlayerLoop and emsPlayerLoop.PlayerData.job.type == 'ems' then
+				TriggerClientEvent('ambulance:client:removePatientBlip', tonumber(playerId), patientId)
+			end
+		end
+		activeSignals[patientId] = nil
+	end
 
 	-- Pay the EMS worker
 	emsPlayer.Functions.AddMoney('cash', sharedConfig.firstaidPayment, 'ems-patient-revival')
 
 	-- Notify both players using configurable texts
-	local patientRevivedConfig = sharedConfig.deathUI.oxNotifications.patientRevived
-	local revivedText = patientRevivedConfig.description:format(sharedConfig.firstaidPayment)
-	exports.qbx_core:Notify(src, revivedText, patientRevivedConfig.type)
-
-	local youWereRevivedConfig = sharedConfig.deathUI.oxNotifications.youWereRevived
-	exports.qbx_core:Notify(patientId, youWereRevivedConfig.description, youWereRevivedConfig.type)
+	exports.qbx_core:Notify(src, ('Patient revived successfully! You earned $%d'):format(sharedConfig.firstaidPayment), 'success')
+	exports.qbx_core:Notify(patientId, 'You have been revived by a paramedic', 'success')
+	
+	debugPrint("EMS", src, "revived patient", patientId)
 end)
 
 -- Death UI and EMS Signal System
@@ -833,144 +854,6 @@ RegisterNetEvent('ambulance:server:respawnPlayer', function()
 
 		exports.qbx_core:Notify(src, 'Респаунахте се в болницата', 'success')
 	end
-end)
-
----EMS heals patient with bandage (gets paid)
-RegisterNetEvent('hospital:server:EmsHealPatient', function(patientId)
-	if GetInvokingResource() then return end
-	local src = source
-
-	-- Security validation
-	if isRateLimited(src, 'healPatient') then
-		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'Rate limited')
-		return
-	end
-
-	local valid, emsPlayer = validatePlayer(src, true)
-	if not valid then
-		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'Invalid EMS player')
-		return
-	end
-
-	-- Validate target player
-	local validTarget, patient = validatePlayer(patientId, false)
-	if not validTarget then
-		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'Invalid patient')
-		return
-	end
-
-	-- Validate distance (must be within 3 meters)
-	if not validateDistance(src, patientId, 3.0) then
-		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'Distance validation failed')
-		return
-	end
-
-	debugPrint("EMS", src, "healing patient", patientId, "with bandage")
-
-	-- Check if EMS worker
-	if emsPlayer.PlayerData.job.type ~= 'ems' then
-		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'Not EMS worker')
-		return
-	end
-
-	-- Remove bandage from EMS inventory
-	if not exports.ox_inventory:RemoveItem(src, 'bandage', 1) then
-		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'No bandage in inventory')
-		return
-	end
-
-	-- Heal the patient
-	local patientPed = GetPlayerPed(patientId)
-	local currentHealth = GetEntityHealth(patientPed)
-	local newHealth = math.min(200, currentHealth + (sharedConfig.bandageHealAmount * 2)) -- Convert percentage to health points
-
-	SetEntityHealth(patientPed, newHealth)
-	TriggerClientEvent('qbx_medical:client:onPlayerHeal', patientId, newHealth)
-
-	-- Pay EMS worker
-	exports.qbx_core:AddMoney(src, 'cash', sharedConfig.bandagePayment, 'EMS healing payment')
-
-	-- Notifications
-	exports.qbx_core:Notify(src, 'Patient healed successfully. Payment: $' .. sharedConfig.bandagePayment, 'success')
-	exports.qbx_core:Notify(patientId, 'You have been treated by EMS', 'success')
-
-	debugPrint("EMS", src, "received $" .. sharedConfig.bandagePayment, "for healing patient", patientId)
-end)
-
----EMS revives patient with firstaid (gets paid)
-RegisterNetEvent('hospital:server:EmsRevivePatient', function(patientId)
-	if GetInvokingResource() then return end
-	local src = source
-
-	-- Security validation
-	if isRateLimited(src, 'revivePatient') then
-		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Rate limited')
-		return
-	end
-
-	local valid, emsPlayer = validatePlayer(src, true)
-	if not valid then
-		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Invalid EMS player')
-		return
-	end
-
-	-- Validate target player
-	local validTarget, patient = validatePlayer(patientId, false)
-	if not validTarget then
-		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Invalid patient')
-		return
-	end
-
-	-- Validate distance (must be within 3 meters)
-	if not validateDistance(src, patientId, 3.0) then
-		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Distance validation failed')
-		return
-	end
-
-	debugPrint("EMS", src, "reviving patient", patientId, "with firstaid")
-
-	-- Check if EMS worker
-	if emsPlayer.PlayerData.job.type ~= 'ems' then
-		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Not EMS worker')
-		return
-	end
-
-	-- Check if patient is actually dead
-	local patientPlayer = exports.qbx_core:GetPlayer(patientId)
-	if not patientPlayer.PlayerData.metadata.isdead then
-		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Patient not dead')
-		return
-	end
-
-	-- Remove firstaid from EMS inventory
-	if not exports.ox_inventory:RemoveItem(src, 'firstaid', 1) then
-		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'No firstaid in inventory')
-		return
-	end
-
-	-- Revive the patient
-	TriggerClientEvent('qbx_medical:client:revive', patientId)
-
-	-- Clear patient's signal if they have one
-	if activeSignals[patientId] then
-		-- Notify all EMS to remove blip
-		for _, playerId in pairs(GetPlayers()) do
-			local emsPlayerLoop = exports.qbx_core:GetPlayer(tonumber(playerId))
-			if emsPlayerLoop and emsPlayerLoop.PlayerData.job.type == 'ems' then
-				TriggerClientEvent('ambulance:client:removePatientBlip', tonumber(playerId), patientId)
-			end
-		end
-		activeSignals[patientId] = nil
-	end
-
-	-- Pay EMS worker
-	exports.qbx_core:AddMoney(src, 'cash', sharedConfig.firstaidPayment, 'EMS revival payment')
-
-	-- Notifications
-	exports.qbx_core:Notify(src, 'Patient revived successfully. Payment: $' .. sharedConfig.firstaidPayment, 'success')
-	exports.qbx_core:Notify(patientId, 'You have been revived by EMS', 'success')
-
-	debugPrint("EMS", src, "received $" .. sharedConfig.firstaidPayment, "for reviving patient", patientId)
 end)
 
 ---Player gets revived (clear their signal)
