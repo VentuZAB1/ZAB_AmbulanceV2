@@ -388,3 +388,30 @@ function OnKeyPress(cb)
         cb()
     end
 end
+
+---Handle healing from EMS treatment
+---@param healPercent number Percentage of health to heal
+RegisterNetEvent('hospital:client:HealPlayer', function(healPercent)
+    local ped = PlayerPedId()
+    local maxHealth = GetEntityMaxHealth(ped)
+    local currentHealth = GetEntityHealth(ped)
+    
+    -- Calculate heal amount based on percentage
+    local healAmount = math.floor(maxHealth * (healPercent / 100))
+    local newHealth = math.min(currentHealth + healAmount, maxHealth)
+    
+    -- Apply the healing
+    SetEntityHealth(ped, newHealth)
+    
+    -- Clear injuries if fully healed
+    if newHealth >= maxHealth then
+        -- Trigger any medical system events to clear injuries
+        TriggerEvent('qbx_medical:client:onPlayerHeal', 'full')
+        -- Clear any bleeding or injury effects
+        if IsInHospitalBed then
+            IsInHospitalBed = false
+        end
+    else
+        TriggerEvent('qbx_medical:client:onPlayerHeal', 'partial')
+    end
+end)
