@@ -189,8 +189,8 @@ showPatientMenu = function(playerId)
     local healthPercentage = 0
     if not isDead and not isLaststand then
         local playerHealth = GetEntityHealth(targetPed)
-        local maxHealth = GetEntityMaxHealth(targetPed)
-        healthPercentage = math.floor((playerHealth / maxHealth) * 100)
+        local actualHealth = math.max(0, playerHealth - 100)
+        healthPercentage = math.floor(actualHealth)
     end
 
     -- Determine patient status
