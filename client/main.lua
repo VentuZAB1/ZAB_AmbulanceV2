@@ -1,390 +1,912 @@
 local sharedConfig = require 'config.shared'
-InBedDict = 'anim@gangops@morgue@table@'
-InBedAnim = 'body_search'
-IsInHospitalBed = false
-HealAnimDict = 'amb@medic@standing@kneel@base'
-HealAnim = 'base'
-EmsNotified = false
-CanLeaveBed = true
-OnPainKillers = false
 
----Notifies EMS of a injury at a location
----@param coords vector3
----@param text string
-RegisterNetEvent('hospital:client:ambulanceAlert', function(coords, text)
-    if GetInvokingResource() then return end
-    local streets = qbx.getStreetName(coords)
-    exports.qbx_core:Notify(locale('text.alert'), 'inform', nil, text .. ' | ' .. streets.main .. ' ' .. streets.cross)
-    PlaySound(-1, 'Lose_1st', 'GTAO_FM_Events_Soundset', false, 0, true)
-    local transG = 250
-    local blip = AddBlipForCoord(coords.x, coords.y, coords.z)
-    local blip2 = AddBlipForCoord(coords.x, coords.y, coords.z)
-    local blipText = locale('info.ems_alert', text)
-    SetBlipSprite(blip, 153)
-    SetBlipSprite(blip2, 161)
-    SetBlipColour(blip, 1)
-    SetBlipColour(blip2, 1)
-    SetBlipDisplay(blip, 4)
-    SetBlipDisplay(blip2, 8)
-    SetBlipAlpha(blip, transG)
-    SetBlipAlpha(blip2, transG)
-    SetBlipScale(blip, 0.8)
-    SetBlipScale(blip2, 2.0)
-    SetBlipAsShortRange(blip, false)
-    SetBlipAsShortRange(blip2, false)
-    PulseBlip(blip2)
-    BeginTextCommandSetBlipName('STRING')
-    AddTextComponentString(blipText)
-    EndTextCommandSetBlipName(blip)
-    while transG ~= 0 do
-        Wait(720)
-        transG -= 1
-        SetBlipAlpha(blip, transG)
-        SetBlipAlpha(blip2, transG)
-        if transG == 0 then
-            RemoveBlip(blip)
-            return
-        end
+-- Debug helper function
+local function debugPrint(...)
+    if sharedConfig.deathUI.debug then
+        print("DEBUG:", ...)
     end
-end)
+end
 
----Revives player, healing all injuries
----Intended to be called from client or server.
-RegisterNetEvent('hospital:client:Revive', function()
-    if IsInHospitalBed then
-        lib.playAnim(cache.ped, InBedDict, InBedAnim, 8.0, 1.0, -1, 1, 0, false, false, false)
-        TriggerEvent('qbx_medical:client:playerRevived')
-        CanLeaveBed = true
+-- Security and Anti-Cheat System
+local playerCooldowns = {} -- Track player cooldowns
+local playerSignals = {} -- Track player signal attempts
+local suspiciousActivity = {} -- Track suspicious behavior
+
+-- Rate limiting configuration
+local RATE_LIMITS = {
+    emsSignal = { maxAttempts = 3, windowMs = 60000 }, -- 3 signals per minute
+    respawn = { maxAttempts = 1, windowMs = 30000 }, -- 1 respawn per 30 seconds
+    patientRevived = { maxAttempts = 5, windowMs = 60000 }, -- 5 revivals per minute
+    healPatient = { maxAttempts = 10, windowMs = 60000 }, -- 10 heals per minute
+    revivePatient = { maxAttempts = 5, windowMs = 60000 } -- 5 revives per minute
+}
+
+-- Security validation functions
+local function isRateLimited(src, eventType)
+    local currentTime = os.time() * 1000
+    local limits = RATE_LIMITS[eventType]
+
+    if not limits then return false end
+
+    if not playerCooldowns[src] then
+        playerCooldowns[src] = {}
     end
 
-    EmsNotified = false
-end)
+    if not playerCooldowns[src][eventType] then
+        playerCooldowns[src][eventType] = { attempts = 0, lastReset = currentTime }
+    end
 
-RegisterNetEvent('qbx_medical:client:playerRevived', function()
-    EmsNotified = false
-end)
+    local cooldown = playerCooldowns[src][eventType]
 
----Sends player phone email with hospital bill.
----@param amount number
-RegisterNetEvent('hospital:client:SendBillEmail', function(amount)
-    if GetInvokingResource() then return end
-    SetTimeout(math.random(2500, 4000), function()
-        local charInfo = QBX.PlayerData.charinfo
-        local gender = charInfo.gender == 1 and locale('info.mrs') or locale('info.mr')
-        TriggerServerEvent('qb-phone:server:sendNewMail', {
-            sender = locale('mail.sender'),
-            subject = locale('mail.subject'),
-            message = locale('mail.message', gender, charInfo.lastname, amount),
-            button = {}
-        })
-    end)
-end)
+    -- Reset if window has passed
+    if currentTime - cooldown.lastReset > limits.windowMs then
+        cooldown.attempts = 0
+        cooldown.lastReset = currentTime
+    end
 
----Sets blips for stations on map
+    -- Check if rate limited
+    if cooldown.attempts >= limits.maxAttempts then
+        return true
+    end
+
+    cooldown.attempts = cooldown.attempts + 1
+    return false
+end
+
+local function validatePlayer(src, requireAlive)
+    local player = exports.qbx_core:GetPlayer(src)
+    if not player then
+        debugPrint("Security: Invalid player", src)
+        return false, nil
+    end
+
+    if requireAlive and (player.PlayerData.metadata.isdead or player.PlayerData.metadata.inlaststand) then
+        debugPrint("Security: Player", src, "is dead but should be alive")
+        return false, player
+    end
+
+    return true, player
+end
+
+local function validateDistance(src, targetSrc, maxDistance)
+    if not targetSrc or src == targetSrc then return false end
+
+    local srcPed = GetPlayerPed(src)
+    local targetPed = GetPlayerPed(targetSrc)
+
+    if not srcPed or not targetPed then return false end
+
+    local srcCoords = GetEntityCoords(srcPed)
+    local targetCoords = GetEntityCoords(targetPed)
+
+    local distance = #(srcCoords - targetCoords)
+    return distance <= maxDistance
+end
+
+local function logSuspiciousActivity(src, event, reason)
+    if not suspiciousActivity[src] then
+        suspiciousActivity[src] = { count = 0, events = {} }
+    end
+
+    suspiciousActivity[src].count = suspiciousActivity[src].count + 1
+    table.insert(suspiciousActivity[src].events, {
+        event = event,
+        reason = reason,
+        timestamp = os.time()
+    })
+
+    debugPrint("SUSPICIOUS ACTIVITY:", src, event, reason)
+
+    -- If too many suspicious activities, take action
+    if suspiciousActivity[src].count >= 5 then
+        debugPrint("CRITICAL: Player", src, "has triggered too many security violations")
+        -- You can add additional actions here like kicking the player
+    end
+end
+
+-- Clean up old data periodically
 CreateThread(function()
-    for _, station in pairs(sharedConfig.locations.stations) do
-        local blip = AddBlipForCoord(station.coords.x, station.coords.y, station.coords.z)
-        SetBlipSprite(blip, 61)
-        SetBlipAsShortRange(blip, true)
-        SetBlipScale(blip, 0.8)
-        SetBlipColour(blip, 25)
-        BeginTextCommandSetBlipName('STRING')
-        AddTextComponentString(station.label)
-        EndTextCommandSetBlipName(blip)
-    end
-end)
+    while true do
+        Wait(300000) -- Every 5 minutes
 
-function GetClosestPlayer()
-    return lib.getClosestPlayer(GetEntityCoords(cache.ped), 5.0, false)
-end
+        local currentTime = os.time()
 
----Revive patient with firstaid (EMS workers get paid)
----@param playerId number
-local function revivePatientWithFirstaid(playerId)
-    local hasFirstaid = exports.ox_inventory:Search('count', 'firstaid') > 0
-    if not hasFirstaid then
-        exports.qbx_core:Notify('You need firstaid to revive the patient', 'error')
-        return
-    end
-
-    if lib.progressCircle({
-        duration = 8000,
-        position = 'bottom',
-        label = 'Reviving patient with firstaid...',
-        useWhileDead = false,
-        canCancel = true,
-        disable = {
-            move = true,
-            car = false,
-            combat = true,
-            mouse = false,
-        },
-        anim = {
-            dict = 'amb@medic@standing@kneel@base',
-            clip = 'base',
-            flag = 1,
-        },
-    })
-    then
-        TriggerServerEvent('hospital:server:EmsRevivePatient', playerId)
-        exports.qbx_core:Notify('Patient revived successfully', 'success')
-    else
-        exports.qbx_core:Notify('Revival cancelled', 'error')
-    end
-end
-
----Heal patient with bandage (EMS workers get paid)
----@param playerId number
-local function healPatientWithBandage(playerId)
-    local hasBandage = exports.ox_inventory:Search('count', 'bandage') > 0
-    if not hasBandage then
-        exports.qbx_core:Notify('You need bandages to heal the patient', 'error')
-        return
-    end
-
-    if lib.progressCircle({
-        duration = 6000,
-        position = 'bottom',
-        label = 'Treating patient with bandages...',
-        useWhileDead = false,
-        canCancel = true,
-        disable = {
-            move = true,
-            car = false,
-            combat = true,
-            mouse = false,
-        },
-        anim = {
-            dict = 'amb@medic@standing@kneel@base',
-            clip = 'base',
-            flag = 1,
-        },
-    })
-    then
-        TriggerServerEvent('hospital:server:EmsHealPatient', playerId)
-        exports.qbx_core:Notify('Patient treated successfully', 'success')
-    else
-        exports.qbx_core:Notify('Treatment cancelled', 'error')
-    end
-end
-
--- Forward declarations
-local showPatientMenu
-local showInjuryMenu
-
----Patient examination menu for EMS workers
----@param playerId number
-showPatientMenu = function(playerId)
-    local targetPed = GetPlayerPed(GetPlayerFromServerId(playerId))
-
-    -- Get player status from medical system
-    local status = lib.callback.await('qbx_ambulancejob:server:getPlayerStatus', false, playerId)
-
-    -- Check if target player is dead/unconscious using server callback
-    local targetStatus = lib.callback.await('qbx_ambulancejob:server:getTargetStatus', false, playerId)
-    local isDead = targetStatus.isDead or false
-    local isLaststand = targetStatus.isLaststand or false
-
-    -- Fix health display for dead/unconscious players
-    local healthPercentage = 0
-    if not isDead and not isLaststand then
-        local playerHealth = GetEntityHealth(targetPed)
-        local actualHealth = math.max(0, playerHealth - 100)
-        healthPercentage = math.floor(actualHealth)
-    end
-
-    -- Determine patient status
-    local patientStatus = "Patient Conscious"
-    local statusIcon = 'fas fa-heartbeat'
-    if isDead then
-        patientStatus = "Patient Dead"
-        statusIcon = 'fas fa-skull'
-    elseif isLaststand then
-        patientStatus = "Patient Unconscious"
-        statusIcon = 'fas fa-bed'
-    elseif healthPercentage < 50 then
-        patientStatus = "Patient Injured"
-        statusIcon = 'fas fa-user-injured'
-    end
-
-    local menuOptions = {
-        {
-            title = '🔍 Patient Status: ' .. patientStatus,
-            description = 'Current patient condition',
-            icon = statusIcon
-        },
-        {
-            title = '🩺 Check for Injuries',
-            description = 'Check if the patient has any fractures or injuries',
-            icon = 'fas fa-user-injured',
-            onSelect = function()
-                showInjuryMenu(playerId, status)
+        -- Clean up old cooldowns
+        for src, cooldowns in pairs(playerCooldowns) do
+            for eventType, cooldown in pairs(cooldowns) do
+                if currentTime * 1000 - cooldown.lastReset > 300000 then -- 5 minutes
+                    cooldowns[eventType] = nil
+                end
             end
-        },
-        {
-            title = '💚 Patient Health: ' .. healthPercentage .. '%',
-            description = 'Current health status',
-            icon = 'fas fa-heart'
-        }
-    }
-
-    -- Show appropriate treatment options based on patient condition
-    if not isDead and not isLaststand then
-        -- Patient is conscious - show heal option
-        local hasBandage = exports.ox_inventory:Search('count', 'bandage') > 0
-        if hasBandage then
-            menuOptions[#menuOptions + 1] = {
-                title = '🩹 Heal Patient',
-                description = 'Use bandages to heal patient\'s wounds',
-                icon = 'fas fa-medkit',
-                onSelect = function()
-                    lib.hideContext()
-                    healPatientWithBandage(playerId)
-                end
-            }
+            if next(cooldowns) == nil then
+                playerCooldowns[src] = nil
+            end
         end
-    else
-        -- Patient is dead or unconscious - show revive option
-        local hasFirstaid = exports.ox_inventory:Search('count', 'firstaid') > 0
-        if hasFirstaid then
-            menuOptions[#menuOptions + 1] = {
-                title = '💉 Revive Patient',
-                description = 'Use firstaid to revive the patient',
-                icon = 'fas fa-heartbeat',
-                onSelect = function()
-                    lib.hideContext()
-                    revivePatientWithFirstaid(playerId)
-                end
-            }
+
+        -- Clean up old suspicious activity
+        for src, activity in pairs(suspiciousActivity) do
+            if currentTime - activity.events[#activity.events].timestamp > 3600 then -- 1 hour
+                suspiciousActivity[src] = nil
+            end
         end
     end
+end)
 
-    lib.registerContext({
-        id = 'patient_examination_menu',
-        title = 'CHECK PATIENT MENU',
-        options = menuOptions
-    })
+---@alias source number
 
-    lib.showContext('patient_examination_menu')
+lib.callback.register('qbx_ambulancejob:server:getPlayerStatus', function(_, targetSrc)
+	local medicalStatus = exports.qbx_medical:GetPlayerStatus(targetSrc)
+	local player = exports.qbx_core:GetPlayer(targetSrc)
+
+	-- Enhanced status with detailed injury information
+	local enhancedStatus = {
+		injuries = medicalStatus.injuries or {},
+		bleedLevel = medicalStatus.bleedLevel or 0,
+		bleedState = medicalStatus.bleedState or 'No bleeding',
+		damageCauses = medicalStatus.damageCauses or {},
+		-- Add more detailed injury descriptions
+		detailedInjuries = {}
+	}
+
+	-- Create detailed injury descriptions based on damage causes
+	if medicalStatus.damageCauses then
+		for weaponHash, _ in pairs(medicalStatus.damageCauses) do
+			local weaponData = exports.qbx_core:GetWeapons()[weaponHash]
+			if weaponData then
+				table.insert(enhancedStatus.detailedInjuries, {
+					cause = weaponData.label or 'Unknown weapon',
+					description = weaponData.damagereason or 'Sustained injuries'
+				})
+			end
+		end
+	end
+
+	return enhancedStatus
+end)
+
+-- Helper function to send ox_lib notifications with configurable settings
+local function sendConfigurableNotification(playerId, notificationKey, ...)
+	local config = sharedConfig.deathUI.oxNotifications[notificationKey]
+	if not config then
+		debugPrint("Warning: No notification config found for key:", notificationKey)
+		return
+	end
+
+	local notification = {
+		title = config.title,
+		description = config.description,
+		type = config.type,
+		position = config.position or "bottom-right",
+		duration = config.duration or 5000
+	}
+
+	-- Format description if arguments provided
+	if ... then
+		notification.description = notification.description:format(...)
+	end
+
+	-- Add style if configured
+	if config.style then
+		notification.style = config.style
+	end
+
+	TriggerClientEvent('ox_lib:notify', playerId, notification)
 end
 
----Show detailed injury examination menu
+local function alertAmbulance(src, text, useOxLib)
+	local ped = GetPlayerPed(src)
+	local coords = GetEntityCoords(ped)
+	local players = exports.qbx_core:GetQBPlayers()
+	for _, v in pairs(players) do
+		if v.PlayerData.job.type == 'ems' and v.PlayerData.job.onduty then
+			if useOxLib then
+				-- Send ox_lib notification for EMS down alerts
+				sendConfigurableNotification(v.PlayerData.source, 'emsDown', text)
+			else
+				-- Use the existing ambulance alert system
+				TriggerClientEvent('hospital:client:ambulanceAlert', v.PlayerData.source, coords, text)
+			end
+		end
+	end
+end
+
+local function registerArmory()
+	for _, armory in pairs(sharedConfig.locations.armory) do
+		exports.ox_inventory:RegisterShop(armory.shopType, armory)
+	end
+end
+
+local function registerStashes()
+    for _, stash in pairs(sharedConfig.locations.stash) do
+        exports.ox_inventory:RegisterStash(stash.name, stash.label, stash.slots, stash.weight, stash.owner, stash.groups, stash.location)
+    end
+end
+
+RegisterNetEvent('hospital:server:ambulanceAlert', function(text)
+	if GetInvokingResource() then return end
+	local src = source
+
+	-- Security validation
+	if isRateLimited(src, 'emsSignal') then
+		logSuspiciousActivity(src, 'hospital:server:ambulanceAlert', 'Rate limited')
+		return
+	end
+
+	local valid, player = validatePlayer(src, false)
+	if not valid then
+		logSuspiciousActivity(src, 'hospital:server:ambulanceAlert', 'Invalid player')
+		return
+	end
+
+	alertAmbulance(src, text or locale('info.civ_down'))
+end)
+
+RegisterNetEvent('hospital:server:emergencyAlert', function()
+	if GetInvokingResource() then return end
+	local src = source
+
+	-- Security validation
+	if isRateLimited(src, 'emsSignal') then
+		logSuspiciousActivity(src, 'hospital:server:emergencyAlert', 'Rate limited')
+		return
+	end
+
+	local valid, player = validatePlayer(src, false)
+	if not valid then
+		logSuspiciousActivity(src, 'hospital:server:emergencyAlert', 'Invalid player')
+		return
+	end
+
+	-- Use configurable EMS down notification with ox_lib
+	alertAmbulance(src, player.PlayerData.charinfo.lastname, true)
+end)
+
+RegisterNetEvent('qbx_medical:server:onPlayerLaststand', function()
+	if GetInvokingResource() then return end
+	local src = source
+
+	-- Security validation
+	if isRateLimited(src, 'emsSignal') then
+		logSuspiciousActivity(src, 'qbx_medical:server:onPlayerLaststand', 'Rate limited')
+		return
+	end
+
+	local valid, player = validatePlayer(src, false)
+	if not valid then
+		logSuspiciousActivity(src, 'qbx_medical:server:onPlayerLaststand', 'Invalid player')
+		return
+	end
+
+	alertAmbulance(src, locale('info.civ_down'))
+end)
+
 ---@param playerId number
----@param status table
-showInjuryMenu = function(playerId, status)
-    local injuryOptions = {}
+RegisterNetEvent('hospital:server:TreatWounds', function(playerId)
+	if GetInvokingResource() then return end
+	local src = source
 
-    -- Show basic injuries from medical system
-    if #status.injuries > 0 then
-        for i = 1, #status.injuries do
-            injuryOptions[#injuryOptions + 1] = {
-                title = '🦴 Fracture: ' .. status.injuries[i],
-                description = 'Bone fracture detected',
-                icon = 'fas fa-bone'
-            }
-        end
-    end
+	-- Security validation
+	if isRateLimited(src, 'healPatient') then
+		logSuspiciousActivity(src, 'hospital:server:TreatWounds', 'Rate limited')
+		return
+	end
 
-    -- Show detailed damage causes (weapons, impacts, etc.)
-    if status.detailedInjuries and #status.detailedInjuries > 0 then
-        for i = 1, #status.detailedInjuries do
-            local injury = status.detailedInjuries[i]
-            injuryOptions[#injuryOptions + 1] = {
-                title = '⚠️ Trauma: ' .. injury.cause,
-                description = injury.description,
-                icon = 'fas fa-exclamation-triangle'
-            }
-        end
-    end
+	local valid, player = validatePlayer(src, true)
+	if not valid then
+		logSuspiciousActivity(src, 'hospital:server:TreatWounds', 'Invalid player')
+		return
+	end
 
-    -- Show bleeding status
-    if status.bleedLevel > 0 then
-        injuryOptions[#injuryOptions + 1] = {
-            title = '🩸 Bleeding: ' .. status.bleedState,
-            description = 'Active bleeding detected - requires immediate attention',
-            icon = 'fas fa-tint'
-        }
-    end
+	-- Validate target player
+	local validTarget, targetPlayer = validatePlayer(playerId, false)
+	if not validTarget then
+		logSuspiciousActivity(src, 'hospital:server:TreatWounds', 'Invalid target player')
+		return
+	end
 
-    -- If no injuries found
-    if #injuryOptions == 0 then
-        injuryOptions[#injuryOptions + 1] = {
-            title = '✅ No Injuries Detected',
-            description = 'Patient appears to be in good condition',
-            icon = 'fas fa-check-circle'
-        }
-    end
+	-- Validate distance (must be within 3 meters)
+	if not validateDistance(src, playerId, 3.0) then
+		logSuspiciousActivity(src, 'hospital:server:TreatWounds', 'Distance validation failed')
+		return
+	end
 
-    -- Add back button
-    injuryOptions[#injuryOptions + 1] = {
-        title = '← Back to Patient Menu',
-        description = 'Return to main examination menu',
-        icon = 'fas fa-arrow-left',
-        onSelect = function()
-            showPatientMenu(playerId)
-        end
+	-- Validate EMS job
+	if player.PlayerData.job.type ~= 'ems' then
+		logSuspiciousActivity(src, 'hospital:server:TreatWounds', 'Not EMS worker')
+		return
+	end
+
+	-- Check if player has bandage
+	if exports.ox_inventory:Search(src, 'count', 'bandage') == 0 then
+		logSuspiciousActivity(src, 'hospital:server:TreatWounds', 'No bandage in inventory')
+		return
+	end
+
+	exports.ox_inventory:RemoveItem(src, 'bandage', 1)
+	TriggerClientEvent('hospital:client:HealInjuries', targetPlayer.PlayerData.source, 'full')
+end)
+
+---@param playerId number
+RegisterNetEvent('hospital:server:RevivePlayer', function(playerId)
+	if GetInvokingResource() then return end
+	local src = source
+
+	-- Security validation
+	if isRateLimited(src, 'revivePatient') then
+		logSuspiciousActivity(src, 'hospital:server:RevivePlayer', 'Rate limited')
+		return
+	end
+
+	local valid, player = validatePlayer(src, true)
+	if not valid then
+		logSuspiciousActivity(src, 'hospital:server:RevivePlayer', 'Invalid player')
+		return
+	end
+
+	-- Validate target player
+	local validTarget, targetPlayer = validatePlayer(playerId, false)
+	if not validTarget then
+		logSuspiciousActivity(src, 'hospital:server:RevivePlayer', 'Invalid target player')
+		return
+	end
+
+	-- Validate distance (must be within 3 meters)
+	if not validateDistance(src, playerId, 3.0) then
+		logSuspiciousActivity(src, 'hospital:server:RevivePlayer', 'Distance validation failed')
+		return
+	end
+
+	-- Check if player has firstaid
+	if exports.ox_inventory:Search(src, 'count', 'firstaid') == 0 then
+		logSuspiciousActivity(src, 'hospital:server:RevivePlayer', 'No firstaid in inventory')
+		return
+	end
+
+	exports.ox_inventory:RemoveItem(src, 'firstaid', 1)
+	TriggerClientEvent('qbx_medical:client:playerRevived', targetPlayer.PlayerData.source)
+end)
+
+---@param targetId number
+RegisterNetEvent('hospital:server:UseFirstAid', function(targetId)
+	if GetInvokingResource() then return end
+	local src = source
+
+	-- Security validation
+	if isRateLimited(src, 'healPatient') then
+		logSuspiciousActivity(src, 'hospital:server:UseFirstAid', 'Rate limited')
+		return
+	end
+
+	local valid, player = validatePlayer(src, true)
+	if not valid then
+		logSuspiciousActivity(src, 'hospital:server:UseFirstAid', 'Invalid player')
+		return
+	end
+
+	-- Validate target player
+	local validTarget, targetPlayer = validatePlayer(targetId, false)
+	if not validTarget then
+		logSuspiciousActivity(src, 'hospital:server:UseFirstAid', 'Invalid target player')
+		return
+	end
+
+	-- Validate distance (must be within 3 meters)
+	if not validateDistance(src, targetId, 3.0) then
+		logSuspiciousActivity(src, 'hospital:server:UseFirstAid', 'Distance validation failed')
+		return
+	end
+
+	local canHelp = lib.callback.await('hospital:client:canHelp', targetId)
+	if not canHelp then
+		exports.qbx_core:Notify(src, locale('error.cant_help'), 'error')
+		return
+	end
+
+	TriggerClientEvent('hospital:client:HelpPerson', src, targetId)
+end)
+
+lib.callback.register('qbx_ambulancejob:server:getNumDoctors', function()
+	return exports.qbx_core:GetDutyCountType('ems')
+end)
+
+lib.callback.register('qbx_ambulancejob:server:getTargetStatus', function(source, targetId)
+	local player = exports.qbx_core:GetPlayer(targetId)
+	if not player then
+		return { isDead = false, isLaststand = false }
+	end
+
+	return {
+		isDead = player.PlayerData.metadata.isdead or false,
+		isLaststand = player.PlayerData.metadata.inlaststand or false
+	}
+end)
+
+lib.addCommand('911e', {
+    help = locale('info.ems_report'),
+    params = {
+        {name = 'message', help = locale('info.message_sent'), type = 'longString', optional = true},
     }
+}, function(source, args)
+	-- Security validation
+	if isRateLimited(source, 'emsSignal') then
+		local rateLimitConfig = sharedConfig.deathUI.oxNotifications.rateLimited
+		exports.qbx_core:Notify(source, rateLimitConfig.description, rateLimitConfig.type)
+		return
+	end
 
-    lib.registerContext({
-        id = 'injury_examination_menu',
-        title = 'INJURY EXAMINATION',
-        options = injuryOptions
-    })
+	local valid, player = validatePlayer(source, false)
+	if not valid then
+		return
+	end
 
-    lib.showContext('injury_examination_menu')
+	local message = args.message or locale('info.civ_call')
+	local ped = GetPlayerPed(source)
+	local coords = GetEntityCoords(ped)
+	local players = exports.qbx_core:GetQBPlayers()
+	for _, v in pairs(players) do
+		if v.PlayerData.job.type == 'ems' and v.PlayerData.job.onduty then
+			TriggerClientEvent('hospital:client:ambulanceAlert', v.PlayerData.source, coords, message)
+		end
+	end
+end)
+
+---@param src number
+---@param event string
+local function triggerEventOnEmsPlayer(src, event)
+	local player = exports.qbx_core:GetPlayer(src)
+	if player.PlayerData.job.type ~= 'ems' then
+		exports.qbx_core:Notify(src, locale('error.not_ems'), 'error')
+		return
+	end
+
+	TriggerClientEvent(event, src)
 end
 
----Create ox_target for patient examination
-local function setupPatientTarget()
-    exports.ox_target:addGlobalPlayer({
-        {
-            icon = 'fas fa-user-md',
-            label = 'Examine Patient',
-            canInteract = function(entity, distance, coords, name, bone)
-                return QBX.PlayerData.job.type == 'ems' and QBX.PlayerData.job.onduty and distance < 2.0
-            end,
-            onSelect = function(data)
-                local playerId = GetPlayerServerId(NetworkGetEntityOwner(data.entity))
-                showPatientMenu(playerId)
-            end,
-        }
-    })
+lib.addCommand('status', {
+    help = locale('info.check_health'),
+}, function(source)
+	triggerEventOnEmsPlayer(source, 'hospital:client:CheckStatus')
+end)
+
+lib.addCommand('heal', {
+    help = locale('info.heal_player'),
+}, function(source)
+	triggerEventOnEmsPlayer(source, 'hospital:client:TreatWounds')
+end)
+
+lib.addCommand('revivep', {
+    help = locale('info.revive_player'),
+}, function(source)
+	triggerEventOnEmsPlayer(source, 'hospital:client:RevivePlayer')
+end)
+
+-- Items
+---@param src number
+---@param item table
+---@param event string
+local function triggerItemEventOnPlayer(src, item, event)
+	local player = exports.qbx_core:GetPlayer(src)
+	if not player then return end
+
+	if exports.ox_inventory:Search(src, 'count', item.name) == 0 then return end
+
+	local removeItem = lib.callback.await(event, src)
+	if not removeItem then return end
+
+	exports.ox_inventory:RemoveItem(src, item.name, 1)
 end
 
--- Setup target once when resource starts or player loads
-local targetSetup = false
-
-CreateThread(function()
-    if not targetSetup then
-        setupPatientTarget()
-        targetSetup = true
-    end
+exports.qbx_core:CreateUseableItem('ifaks', function(source, item)
+	triggerItemEventOnPlayer(source, item, 'hospital:client:UseIfaks')
 end)
 
--- Update target system when player job changes (instant response)
-RegisterNetEvent('QBCore:Client:OnJobUpdate', function(JobInfo)
-    -- Target system will automatically check canInteract function in real-time
-    -- QBX.PlayerData.job is updated automatically by core
+exports.qbx_core:CreateUseableItem('bandage', function(source, item)
+	triggerItemEventOnPlayer(source, item, 'hospital:client:UseBandage')
 end)
 
--- Also handle when player goes on/off duty
-RegisterNetEvent('QBCore:Client:SetDuty', function(duty)
-    -- Target system will automatically check canInteract function in real-time
-    -- QBX.PlayerData.job.onduty is updated automatically by core
+exports.qbx_core:CreateUseableItem('painkillers', function(source, item)
+	triggerItemEventOnPlayer(source, item, 'hospital:client:UsePainkillers')
 end)
 
--- Handle player data updates for instant target response
-AddEventHandler('QBCore:Client:OnPlayerLoaded', function()
-    -- Ensure target system is ready when player loads (only if not already set up)
-    if not targetSetup then
-        setupPatientTarget()
-        targetSetup = true
-    end
+exports.qbx_core:CreateUseableItem('firstaid', function(source, item)
+	triggerItemEventOnPlayer(source, item, 'hospital:client:UseFirstAid')
 end)
 
-function OnKeyPress(cb)
-    if IsControlJustPressed(0, 38) then
-        lib.hideTextUI()
-        cb()
-    end
-end
+RegisterNetEvent('qbx_medical:server:playerDied', function()
+	if GetInvokingResource() then return end
+	local src = source
+
+	-- Security validation
+	if isRateLimited(src, 'emsSignal') then
+		logSuspiciousActivity(src, 'qbx_medical:server:playerDied', 'Rate limited')
+		return
+	end
+
+	local valid, player = validatePlayer(src, false)
+	if not valid then
+		logSuspiciousActivity(src, 'qbx_medical:server:playerDied', 'Invalid player')
+		return
+	end
+
+	alertAmbulance(src, locale('info.civ_died'))
+end)
+
+---EMS worker heals patient with bandage and gets paid
+---@param patientId number
+RegisterNetEvent('hospital:server:EmsHealPatient', function(patientId)
+	if GetInvokingResource() then return end
+	local src = source
+
+	-- Security validation
+	if isRateLimited(src, 'healPatient') then
+		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'Rate limited')
+		return
+	end
+
+	local valid, emsPlayer = validatePlayer(src, true)
+	if not valid then
+		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'Invalid EMS player')
+		return
+	end
+
+	-- Validate target player
+	local validTarget, patient = validatePlayer(patientId, false)
+	if not validTarget then
+		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'Invalid patient')
+		return
+	end
+
+	-- Validate distance (must be within 3 meters)
+	if not validateDistance(src, patientId, 3.0) then
+		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'Distance validation failed')
+		return
+	end
+
+	-- Verify EMS worker
+	if emsPlayer.PlayerData.job.type ~= 'ems' then
+		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'Not EMS worker')
+		return
+	end
+
+	-- Check if EMS has bandages
+	if exports.ox_inventory:Search(src, 'count', 'bandage') == 0 then
+		logSuspiciousActivity(src, 'hospital:server:EmsHealPatient', 'No bandage in inventory')
+		return
+	end
+
+	-- Remove bandage from EMS worker
+	exports.ox_inventory:RemoveItem(src, 'bandage', 1)
+
+	-- Use qbx_medical's HealPartially export to heal injuries and stop bleeding
+	exports.qbx_medical:HealPartially(patientId)
+	
+	-- Also trigger a client event to restore actual health points (25% of max)
+	-- We need to create a custom event for this since qbx_medical doesn't restore HP with partial heal
+	TriggerClientEvent('hospital:client:restoreHealth', patientId, sharedConfig.bandageHealAmount)
+
+	-- Pay the EMS worker
+	emsPlayer.Functions.AddMoney('cash', sharedConfig.bandagePayment, 'ems-patient-heal')
+
+	-- Notify both players
+	exports.qbx_core:Notify(src, ('Patient healed successfully! You earned $%d'):format(sharedConfig.bandagePayment), 'success')
+	exports.qbx_core:Notify(patientId, 'You have been treated by a paramedic', 'success')
+end)
+
+---EMS worker revives patient with firstaid and gets paid
+---@param patientId number
+RegisterNetEvent('hospital:server:EmsRevivePatient', function(patientId)
+	if GetInvokingResource() then return end
+	local src = source
+
+	-- Security validation
+	if isRateLimited(src, 'revivePatient') then
+		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Rate limited')
+		return
+	end
+
+	local valid, emsPlayer = validatePlayer(src, true)
+	if not valid then
+		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Invalid EMS player')
+		return
+	end
+
+	-- Validate target player
+	local validTarget, patient = validatePlayer(patientId, false)
+	if not validTarget then
+		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Invalid patient')
+		return
+	end
+
+	-- Validate distance (must be within 3 meters)
+	if not validateDistance(src, patientId, 3.0) then
+		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Distance validation failed')
+		return
+	end
+
+	-- Verify EMS worker
+	if emsPlayer.PlayerData.job.type ~= 'ems' then
+		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Not EMS worker')
+		return
+	end
+
+	-- Check if patient is actually dead
+	local patientPlayer = exports.qbx_core:GetPlayer(patientId)
+	if not patientPlayer.PlayerData.metadata.isdead then
+		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'Patient not dead')
+		return
+	end
+
+	-- Check if EMS has firstaid
+	if exports.ox_inventory:Search(src, 'count', 'firstaid') == 0 then
+		logSuspiciousActivity(src, 'hospital:server:EmsRevivePatient', 'No firstaid in inventory')
+		return
+	end
+
+	-- Remove firstaid from EMS worker
+	exports.ox_inventory:RemoveItem(src, 'firstaid', 1)
+
+	-- Revive the patient
+	TriggerClientEvent('qbx_medical:client:playerRevived', patientId)
+
+	-- Pay the EMS worker
+	emsPlayer.Functions.AddMoney('cash', sharedConfig.firstaidPayment, 'ems-patient-revival')
+
+	-- Notify both players using configurable texts
+	local patientRevivedConfig = sharedConfig.deathUI.oxNotifications.patientRevived
+	local revivedText = patientRevivedConfig.description:format(sharedConfig.firstaidPayment)
+	exports.qbx_core:Notify(src, revivedText, patientRevivedConfig.type)
+
+	local youWereRevivedConfig = sharedConfig.deathUI.oxNotifications.youWereRevived
+	exports.qbx_core:Notify(patientId, youWereRevivedConfig.description, youWereRevivedConfig.type)
+end)
+
+-- Death UI and EMS Signal System
+local activeSignals = {} -- Store active patient signals
+
+---Player sends EMS signal when dead
+RegisterNetEvent('ambulance:server:sendEMSSignal', function()
+	if GetInvokingResource() then return end
+	local src = source
+
+	-- Security validation
+	if isRateLimited(src, 'emsSignal') then
+		logSuspiciousActivity(src, 'ambulance:server:sendEMSSignal', 'Rate limited')
+		local rateLimitConfig = sharedConfig.deathUI.oxNotifications.rateLimited
+		exports.qbx_core:Notify(src, rateLimitConfig.description, rateLimitConfig.type)
+		return
+	end
+
+	local valid, player = validatePlayer(src, false)
+	if not valid then
+		logSuspiciousActivity(src, 'ambulance:server:sendEMSSignal', 'Invalid player')
+		return
+	end
+
+	-- Verify player is actually dead
+	if not player.PlayerData.metadata.isdead then
+		logSuspiciousActivity(src, 'ambulance:server:sendEMSSignal', 'Player not dead')
+		return
+	end
+
+	debugPrint("Received EMS signal from player", src)
+
+	-- Get player coordinates
+	local playerPed = GetPlayerPed(src)
+	local coords = GetEntityCoords(playerPed)
+	local playerName = player.PlayerData.charinfo.firstname .. ' ' .. player.PlayerData.charinfo.lastname
+
+	-- Store signal data
+	activeSignals[src] = {
+		playerId = src,
+		playerName = playerName,
+		coords = coords,
+		timestamp = os.time()
+	}
+
+	-- Get all online EMS workers
+	local emsPlayers = {}
+	for _, playerId in pairs(GetPlayers()) do
+		local emsPlayer = exports.qbx_core:GetPlayer(tonumber(playerId))
+		if emsPlayer and emsPlayer.PlayerData.job.type == 'ems' and emsPlayer.PlayerData.job.onduty then
+			table.insert(emsPlayers, tonumber(playerId))
+		end
+	end
+
+	-- Send notification and blip to all EMS workers
+	debugPrint("Found", #emsPlayers, "EMS workers online")
+	if #emsPlayers > 0 then
+		local notificationConfig = sharedConfig.deathUI.oxNotifications.emsAlert
+		local notificationText = notificationConfig.description:format(playerName)
+		debugPrint("Sending notification:", notificationText)
+
+		for i = 1, #emsPlayers do
+			local emsId = emsPlayers[i]
+			debugPrint("Sending alert to EMS", emsId)
+
+			-- Send ox_lib notification using configurable settings
+			local notification = {
+				title = notificationConfig.title,
+				description = notificationText,
+				type = notificationConfig.type,
+				position = notificationConfig.position,
+				duration = notificationConfig.duration
+			}
+
+			-- Add style if configured
+			if notificationConfig.style then
+				notification.style = notificationConfig.style
+			end
+
+			TriggerClientEvent('ox_lib:notify', emsId, notification)
+			TriggerClientEvent('ambulance:client:playEMSAlert', emsId)
+
+			-- Create flickering blip on map
+			TriggerClientEvent('ambulance:client:createPatientBlip', emsId, src, playerName, coords)
+		end
+
+		local signalSentConfig = sharedConfig.deathUI.oxNotifications.signalSent
+		exports.qbx_core:Notify(src, signalSentConfig.description, signalSentConfig.type)
+	else
+		debugPrint("No EMS workers online")
+		local noEmsConfig = sharedConfig.deathUI.oxNotifications.noEmsOnline
+		exports.qbx_core:Notify(src, noEmsConfig.description, noEmsConfig.type)
+	end
+end)
+
+---Player respawns (clears their signal)
+RegisterNetEvent('ambulance:server:respawnPlayer', function()
+	if GetInvokingResource() then return end
+	local src = source
+
+	-- Security validation
+	if isRateLimited(src, 'respawn') then
+		logSuspiciousActivity(src, 'ambulance:server:respawnPlayer', 'Rate limited')
+		return
+	end
+
+	local valid, player = validatePlayer(src, false)
+	if not valid then
+		logSuspiciousActivity(src, 'ambulance:server:respawnPlayer', 'Invalid player')
+		return
+	end
+
+	-- Verify player is actually dead
+	local player = exports.qbx_core:GetPlayer(src)
+	if not player.PlayerData.metadata.isdead then
+		logSuspiciousActivity(src, 'ambulance:server:respawnPlayer', 'Player not dead')
+		return
+	end
+
+	-- Clear active signal
+	if activeSignals[src] then
+		-- Notify all EMS to remove blip
+		for _, playerId in pairs(GetPlayers()) do
+			local emsPlayer = exports.qbx_core:GetPlayer(tonumber(playerId))
+			if emsPlayer and emsPlayer.PlayerData.job.type == 'ems' then
+				TriggerClientEvent('ambulance:client:removePatientBlip', tonumber(playerId), src)
+			end
+		end
+
+		activeSignals[src] = nil
+	end
+
+	-- Clear death state and trigger respawn
+	if player then
+		-- Clear death metadata
+		player.Functions.SetMetaData('isdead', false)
+		player.Functions.SetMetaData('inlaststand', false)
+
+		-- Get all hospital beds from config
+		local config = require 'config.shared'
+		local allBeds = {}
+
+		-- Collect all beds from all hospitals
+		for hospitalName, hospitalData in pairs(config.locations.hospitals) do
+			for _, bed in pairs(hospitalData.beds) do
+				table.insert(allBeds, bed.coords)
+			end
+		end
+
+		-- Select a random bed from all available hospital beds
+		if #allBeds > 0 then
+			local selectedBed = allBeds[math.random(#allBeds)]
+			debugPrint("Selected bed from", #allBeds, "available beds:", selectedBed.x, selectedBed.y, selectedBed.z)
+
+			-- Trigger respawn at selected hospital bed
+			TriggerClientEvent('ambulance:client:respawnAtBed', src, selectedBed)
+		else
+			print("ERROR: No hospital beds found in config!")
+			-- Fallback to default location
+			TriggerClientEvent('ambulance:client:respawnAtBed', src, vec4(353.1, -584.6, 43.11, 152.08))
+		end
+
+		-- Clear all inventory items (as mentioned in UI warning)
+		debugPrint("Clearing inventory for player", src)
+		exports.ox_inventory:ClearInventory(src, false)
+
+		-- Also clear any money (optional - you can comment this out if you want to keep money)
+		-- player.Functions.SetMoney('cash', 0)
+		-- player.Functions.SetMoney('bank', 0)
+
+		exports.qbx_core:Notify(src, 'Респаунахте се в болницата', 'success')
+	end
+end)
+
+---Player gets revived (clear their signal)
+RegisterNetEvent('ambulance:server:patientRevived', function(patientId)
+	if GetInvokingResource() then return end
+	local src = source
+
+	-- Security validation
+	if isRateLimited(src, 'patientRevived') then
+		logSuspiciousActivity(src, 'ambulance:server:patientRevived', 'Rate limited')
+		return
+	end
+
+	local valid, player = validatePlayer(src, false)
+	if not valid then
+		logSuspiciousActivity(src, 'ambulance:server:patientRevived', 'Invalid player')
+		return
+	end
+
+	-- Clear active signal for revived patient
+	if activeSignals[patientId] then
+		-- Notify all EMS to remove blip
+		for _, playerId in pairs(GetPlayers()) do
+			local emsPlayer = exports.qbx_core:GetPlayer(tonumber(playerId))
+			if emsPlayer and emsPlayer.PlayerData.job.type == 'ems' then
+				TriggerClientEvent('ambulance:client:removePatientBlip', tonumber(playerId), patientId)
+			end
+		end
+
+		activeSignals[patientId] = nil
+	end
+end)
+
+---Clean up signals when players disconnect
+AddEventHandler('playerDropped', function(reason)
+	local src = source
+
+	if activeSignals[src] then
+		-- Notify all EMS to remove blip
+		for _, playerId in pairs(GetPlayers()) do
+			local emsPlayer = exports.qbx_core:GetPlayer(tonumber(playerId))
+			if emsPlayer and emsPlayer.PlayerData.job.type == 'ems' then
+				TriggerClientEvent('ambulance:client:removePatientBlip', tonumber(playerId), src)
+			end
+		end
+
+		activeSignals[src] = nil
+	end
+
+	-- Clean up security data
+	playerCooldowns[src] = nil
+	suspiciousActivity[src] = nil
+end)
+
+---Send existing signals to EMS when they come on duty
+RegisterNetEvent('QBCore:Server:SetDuty', function(duty)
+	local src = source
+	local player = exports.qbx_core:GetPlayer(src)
+
+	if player and player.PlayerData.job.type == 'ems' and duty then
+		-- Send all active signals to the newly on-duty EMS
+		for patientId, signalData in pairs(activeSignals) do
+			-- Check if patient is still online and still dead
+			local patientPlayer = exports.qbx_core:GetPlayer(patientId)
+			if patientPlayer then
+				TriggerClientEvent('ambulance:client:createPatientBlip', src, patientId, signalData.playerName, signalData.coords)
+			else
+				-- Clean up stale signal
+				activeSignals[patientId] = nil
+			end
+		end
+	end
+end)
+
+AddEventHandler('onResourceStart', function(resource)
+    if resource ~= GetCurrentResourceName() then return end
+
+    registerArmory()
+    registerStashes()
+end)
