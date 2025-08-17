@@ -189,8 +189,8 @@ showPatientMenu = function(playerId)
     local healthPercentage = 0
     if not isDead and not isLaststand then
         local playerHealth = GetEntityHealth(targetPed)
-        local maxHealth = GetEntityMaxHealth(targetPed)
-        healthPercentage = math.floor((playerHealth / maxHealth) * 100)
+        local actualHealth = math.max(0, playerHealth - 100)
+        healthPercentage = math.floor(actualHealth)
     end
 
     -- Determine patient status
@@ -371,6 +371,25 @@ end)
 RegisterNetEvent('QBCore:Client:SetDuty', function(duty)
     -- Target system will automatically check canInteract function in real-time
     -- QBX.PlayerData.job.onduty is updated automatically by core
+end)
+
+RegisterNetEvent('hospital:client:restoreHealth', function(healPercent)
+    local ped = cache.ped or PlayerPedId()
+    local currentHealth = GetEntityHealth(ped)
+    local maxHealth = GetEntityMaxHealth(ped)
+    
+    -- Calculate heal amount (healPercent is typically 25 for 25%)
+    local healAmount = math.floor((healPercent / 100) * 100) -- Convert percentage to HP (25% of 100 base health)
+    local newHealth = math.min(200, currentHealth + healAmount) -- Cap at 200 (FiveM max)
+    
+    -- Set the new health
+    SetEntityHealth(ped, newHealth)
+    
+    -- Visual feedback
+    StopScreenEffect('DeathFailOut')
+    if newHealth > 150 then
+        StopScreenEffect('DrugsMichaelAliensFightIn')
+    end
 end)
 
 -- Handle player data updates for instant target response
