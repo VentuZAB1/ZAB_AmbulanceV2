@@ -828,7 +828,12 @@ RegisterNetEvent('ambulance:server:respawnPlayer', function()
 		-- player.Functions.SetMoney('cash', 0)
 		-- player.Functions.SetMoney('bank', 0)
 
-		exports.qbx_core:Notify(src, 'Респаунахте се в болницата', 'success')
+		-- Use the respawn notification from config if it exists, otherwise use a default
+		if sharedConfig.deathUI.oxNotifications.respawnSuccess then
+			exports.qbx_core:Notify(src, sharedConfig.deathUI.oxNotifications.respawnSuccess.description, sharedConfig.deathUI.oxNotifications.respawnSuccess.type or 'success')
+		else
+			exports.qbx_core:Notify(src, 'You have respawned at the hospital', 'success')
+		end
 	end
 end)
 
