@@ -1,6 +1,8 @@
 local config = require 'config.client'
 local sharedConfig = require 'config.shared'
 local doctorCount = 0
+local isDeadStateActive = false
+local lastDoctorUpdate = GetGameTimer()
 
 local function getDoctorCount()
     return lib.callback.await('qbx_ambulancejob:server:getNumDoctors')
@@ -77,44 +79,51 @@ local function handleLastStand()
     end
 end
 
--- Use statebag change handlers instead of continuous polling
-local isDeadStateActive = false
-local lastDoctorUpdate = GetGameTimer()
+-- Initialize death state handler only after player is loaded
+local function initializeDeathHandler()
+    -- Handler for death state changes
+    AddStateBagChangeHandler('qbx_medical:deathState', ('player:%s'):format(cache.serverId), function(bagName, key, value, reserved, replicated)
+        local medicalConfig = require '@qbx_medical/config/shared'
+        local isDead = (value == medicalConfig.deathState.DEAD)
+        local inLaststand = (value == medicalConfig.deathState.LAST_STAND)
 
--- Handler for death state changes
-AddStateBagChangeHandler('qbx_medical:deathState', ('player:%s'):format(cache.serverId), function(bagName, key, value, reserved, replicated)
-    local medicalConfig = require '@qbx_medical/config/shared'
-    local isDead = (value == medicalConfig.deathState.DEAD)
-    local inLaststand = (value == medicalConfig.deathState.LAST_STAND)
+        if isDead or inLaststand then
+            if not isDeadStateActive then
+                isDeadStateActive = true
+                -- Start the handler thread only when needed
+                CreateThread(function()
+                    while isDeadStateActive and (exports.qbx_medical:IsDead() or exports.qbx_medical:IsLaststand()) do
+                        local currentIsDead = exports.qbx_medical:IsDead()
+                        local currentInLaststand = exports.qbx_medical:IsLaststand()
 
-    if isDead or inLaststand then
-        if not isDeadStateActive then
-            isDeadStateActive = true
-            -- Start the handler thread only when needed
-            CreateThread(function()
-                while isDeadStateActive and (exports.qbx_medical:IsDead() or exports.qbx_medical:IsLaststand()) do
-                    local currentIsDead = exports.qbx_medical:IsDead()
-                    local currentInLaststand = exports.qbx_medical:IsLaststand()
+                        if currentIsDead then
+                            handleDead(cache.ped)
+                        elseif currentInLaststand then
+                            handleLastStand()
+                        end
 
-                    if currentIsDead then
-                        handleDead(cache.ped)
-                    elseif currentInLaststand then
-                        handleLastStand()
+                        -- Update doctor count every 60 seconds
+                        local currentTime = GetGameTimer()
+                        if (currentTime - lastDoctorUpdate) > 60000 then
+                            doctorCount = getDoctorCount()
+                            lastDoctorUpdate = currentTime
+                        end
+
+                        Wait(500) -- Much less frequent than Wait(0)
                     end
-
-                    -- Update doctor count every 60 seconds
-                    local currentTime = GetGameTimer()
-                    if (currentTime - lastDoctorUpdate) > 60000 then
-                        doctorCount = getDoctorCount()
-                        lastDoctorUpdate = currentTime
-                    end
-
-                    Wait(500) -- Much less frequent than Wait(0)
-                end
-                isDeadStateActive = false
-            end)
+                    isDeadStateActive = false
+                end)
+            end
+        else
+            isDeadStateActive = false
         end
-    else
-        isDeadStateActive = false
-    end
+    end)
+    
+    -- Get initial doctor count after player loads
+    doctorCount = getDoctorCount()
+end
+
+-- Wait for player to be loaded before initializing
+RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
+    initializeDeathHandler()
 end)
